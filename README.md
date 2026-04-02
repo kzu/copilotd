@@ -26,11 +26,15 @@ cd copilotd
 dotnet build
 
 # First-run setup (checks dependencies, prompts for config)
-dotnet run --project src/copilotd -- init
+./copilotd.sh init          # macOS/Linux
+copilotd.cmd init           # Windows
 
 # Start the daemon
-dotnet run --project src/copilotd -- run
+./copilotd.sh run           # macOS/Linux
+copilotd.cmd run            # Windows
 ```
+
+Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the project from source via `dotnet run`, passing all arguments through.
 
 ## Commands
 
