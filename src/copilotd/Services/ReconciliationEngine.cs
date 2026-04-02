@@ -159,7 +159,8 @@ public sealed class ReconciliationEngine
 
             if (!desired.ContainsKey(key))
             {
-                _logger.LogInformation("Issue {Key} no longer matches rules, marking session completed", key);
+                _logger.LogInformation("Issue {Key} no longer matches rules, terminating session", key);
+                _processManager.TerminateProcess(session);
                 session.Status = SessionStatus.Completed;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
             }
