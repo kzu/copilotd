@@ -64,8 +64,14 @@ public sealed class DispatchRule
 
     // --- Launch options ---
 
-    /// <summary>Whether to pass --yolo (--allow-all) to copilot.</summary>
+    /// <summary>Whether to pass --yolo to copilot, which implies --allow-all-tools and --allow-all-urls.</summary>
     public bool Yolo { get; set; }
+
+    /// <summary>Whether to pass --allow-all-tools to copilot. Defaults to true. Implied by Yolo.</summary>
+    public bool AllowAllTools { get; set; } = true;
+
+    /// <summary>Whether to pass --allow-all-urls to copilot. Defaults to false. Implied by Yolo.</summary>
+    public bool AllowAllUrls { get; set; }
 
     /// <summary>Extra prompt text appended when this rule triggers.</summary>
     public string? ExtraPrompt { get; set; }

@@ -35,7 +35,7 @@ public sealed partial class ProcessManager
         }
 
         var prompt = BuildPrompt(config, issue, session);
-        var args = BuildArguments(session, prompt, config.Rules.GetValueOrDefault(session.RuleName));
+        var args = BuildArguments(session, prompt, config.Rules.GetValueOrDefault(session.RuleName), repoPath);
 
         _logger.LogInformation("Launching copilot for {IssueKey} with session {SessionId}", session.IssueKey, session.CopilotSessionId);
         _logger.LogDebug("copilot {Args}", args);
@@ -365,20 +365,34 @@ public sealed partial class ProcessManager
         return prompt;
     }
 
-    private static string BuildArguments(DispatchSession session, string prompt, DispatchRule? rule)
+    private static string BuildArguments(DispatchSession session, string prompt, DispatchRule? rule, string repoPath)
     {
         var args = new List<string>
         {
             "--remote",
             $"--resume={session.CopilotSessionId}",
             "-i", $"\"{EscapeArg(prompt)}\"",
-            "--allow-all-tools",
         };
 
-        if (rule?.Yolo == true)
+        var yolo = rule?.Yolo == true;
+
+        if (yolo)
         {
             args.Add("--yolo");
         }
+        else
+        {
+            // Yolo implies both, so only add individually when not using yolo
+            if (rule?.AllowAllTools != false)
+                args.Add("--allow-all-tools");
+
+            if (rule?.AllowAllUrls == true)
+                args.Add("--allow-all-urls");
+        }
+
+        // Always add the repo directory as an allowed path
+        args.Add("--add-dir");
+        args.Add($"\"{EscapeArg(repoPath)}\"");
 
         return string.Join(' ', args);
     }

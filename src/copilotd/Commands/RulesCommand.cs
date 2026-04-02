@@ -59,6 +59,8 @@ public static class RulesCommand
                 table.AddColumn("Type");
                 table.AddColumn("Repos");
                 table.AddColumn("Yolo");
+                table.AddColumn("Tools");
+                table.AddColumn("URLs");
 
                 foreach (var kvp in rules)
                 {
@@ -71,7 +73,9 @@ public static class RulesCommand
                         Markup.Escape(rule.Milestone ?? "*"),
                         Markup.Escape(rule.Type ?? "*"),
                         Markup.Escape(string.Join(", ", rule.Repos)),
-                        rule.Yolo ? "yes" : "no");
+                        rule.Yolo ? "yes" : "no",
+                        rule.Yolo || rule.AllowAllTools ? "yes" : "no",
+                        rule.Yolo || rule.AllowAllUrls ? "yes" : "no");
                 }
 
                 AnsiConsole.Write(table);
@@ -90,7 +94,9 @@ public static class RulesCommand
         var labelOption = new Option<string[]>("--label") { Description = "Label condition (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
         var milestoneOption = new Option<string?>("--milestone") { Description = "Milestone condition" };
         var typeOption = new Option<string?>("--type") { Description = "Issue type condition" };
-        var yoloOption = new Option<bool>("--yolo") { Description = "Pass --yolo to copilot" };
+        var yoloOption = new Option<bool>("--yolo") { Description = "Pass --yolo to copilot (implies --allow-all-tools and --allow-all-urls)" };
+        var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Pass --allow-all-tools to copilot (default: true)" };
+        var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Pass --allow-all-urls to copilot (default: false)" };
         var promptOption = new Option<string?>("--prompt") { Description = "Extra prompt for this rule" };
         var repoOption = new Option<string[]>("--repo") { Description = "Repository to add (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
 
@@ -100,6 +106,8 @@ public static class RulesCommand
         command.Options.Add(milestoneOption);
         command.Options.Add(typeOption);
         command.Options.Add(yoloOption);
+        command.Options.Add(allowAllToolsOption);
+        command.Options.Add(allowAllUrlsOption);
         command.Options.Add(promptOption);
         command.Options.Add(repoOption);
 
@@ -126,6 +134,8 @@ public static class RulesCommand
                     Milestone = parseResult.GetValue(milestoneOption),
                     Type = parseResult.GetValue(typeOption),
                     Yolo = parseResult.GetValue(yoloOption),
+                    AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true,
+                    AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false,
                     ExtraPrompt = parseResult.GetValue(promptOption),
                     Repos = [.. parseResult.GetValue(repoOption) ?? []],
                 };
@@ -150,6 +160,8 @@ public static class RulesCommand
         var milestoneOption = new Option<string?>("--milestone") { Description = "Update milestone condition" };
         var typeOption = new Option<string?>("--type") { Description = "Update type condition" };
         var yoloOption = new Option<bool?>("--yolo") { Description = "Update yolo setting" };
+        var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Update allow-all-tools setting" };
+        var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Update allow-all-urls setting" };
         var promptOption = new Option<string?>("--prompt") { Description = "Update extra prompt" };
         var addRepoOption = new Option<string[]>("--add-repo") { Description = "Add a repository", AllowMultipleArgumentsPerToken = true };
         var deleteRepoOption = new Option<string[]>("--delete-repo") { Description = "Remove a repository", AllowMultipleArgumentsPerToken = true };
@@ -161,6 +173,8 @@ public static class RulesCommand
         command.Options.Add(milestoneOption);
         command.Options.Add(typeOption);
         command.Options.Add(yoloOption);
+        command.Options.Add(allowAllToolsOption);
+        command.Options.Add(allowAllUrlsOption);
         command.Options.Add(promptOption);
         command.Options.Add(addRepoOption);
         command.Options.Add(deleteRepoOption);
@@ -202,6 +216,12 @@ public static class RulesCommand
 
                 if (parseResult.GetResult(yoloOption) is not null)
                     rule.Yolo = parseResult.GetValue(yoloOption) ?? false;
+
+                if (parseResult.GetResult(allowAllToolsOption) is not null)
+                    rule.AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true;
+
+                if (parseResult.GetResult(allowAllUrlsOption) is not null)
+                    rule.AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false;
 
                 if (parseResult.GetResult(promptOption) is not null)
                     rule.ExtraPrompt = parseResult.GetValue(promptOption);
