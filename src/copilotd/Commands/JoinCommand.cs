@@ -94,6 +94,17 @@ public static class JoinCommand
                         return 1;
                     }
 
+                    // Track the interactive process PID so the daemon can detect
+                    // if it exits (e.g., terminal killed without cleanup)
+                    state = stateStore.LoadState();
+                    if (state.Sessions.TryGetValue(issueKey, out var tracked))
+                    {
+                        tracked.ProcessId = interactiveProcess.Id;
+                        try { tracked.ProcessStartTime = new DateTimeOffset(interactiveProcess.StartTime.ToUniversalTime(), TimeSpan.Zero); }
+                        catch { tracked.ProcessStartTime = DateTimeOffset.UtcNow; }
+                        stateStore.SaveState(state);
+                    }
+
                     await interactiveProcess.WaitForExitAsync(ct);
                     var exitCode = interactiveProcess.ExitCode;
 

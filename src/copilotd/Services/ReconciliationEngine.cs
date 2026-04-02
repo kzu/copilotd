@@ -99,16 +99,23 @@ public sealed class ReconciliationEngine
             if (session.Status is SessionStatus.Pending)
                 continue;
 
-            // Reset stale Joined sessions — if a join process crashed or was killed
-            // without cleanup, the session gets stuck. Reset after 1 hour.
+            // For Joined sessions, check if the interactive process is still alive.
+            // If it exited (e.g., terminal killed without cleanup), reset to Pending.
             if (session.Status is SessionStatus.Joined)
             {
-                var joinedAge = DateTimeOffset.UtcNow - session.UpdatedAt;
-                if (joinedAge > TimeSpan.FromHours(1))
+                if (session.ProcessId is null)
                 {
-                    _logger.LogWarning("Session {Key} has been Joined for {Hours:F1}h with no active join process, resetting to Pending",
-                        key, joinedAge.TotalHours);
+                    // No PID tracked yet (join just started), skip
+                    continue;
+                }
+
+                var joinResult = _processManager.CheckProcess(session);
+                if (joinResult is ProcessLivenessResult.Dead or ProcessLivenessResult.PidReused)
+                {
+                    _logger.LogInformation("Joined session {Key} interactive process is gone, resetting to Pending", key);
                     session.Status = SessionStatus.Pending;
+                    session.ProcessId = null;
+                    session.ProcessStartTime = null;
                     session.UpdatedAt = DateTimeOffset.UtcNow;
                 }
                 continue;
