@@ -196,6 +196,8 @@ public sealed class GhCliService
         return issues;
     }
 
+    private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);
+
     private (int ExitCode, string Output) RunGh(string arguments)
     {
         _logger.LogDebug("Running: gh {Args}", arguments);
@@ -211,10 +213,19 @@ public sealed class GhCliService
         };
 
         using var process = Process.Start(psi)!;
-        var stdout = process.StandardOutput.ReadToEnd();
-        var stderr = process.StandardError.ReadToEnd();
-        process.WaitForExit();
 
+        // Read stderr asynchronously to avoid deadlock when pipe buffers fill
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdout = process.StandardOutput.ReadToEnd();
+
+        if (!process.WaitForExit(GhTimeout))
+        {
+            _logger.LogWarning("gh command timed out after {Timeout}s: gh {Args}", GhTimeout.TotalSeconds, arguments);
+            process.Kill();
+            return (-1, "gh command timed out");
+        }
+
+        var stderr = stderrTask.Result;
         var output = string.IsNullOrEmpty(stdout) ? stderr : stdout;
         return (process.ExitCode, output);
     }

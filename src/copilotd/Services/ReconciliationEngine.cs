@@ -40,16 +40,19 @@ public sealed class ReconciliationEngine
     {
         _logger.LogInformation("Starting reconciliation cycle");
 
+        // Step 0: Prune terminal sessions older than 7 days
+        PruneTerminalSessions(state);
+
         // Step 1: Verify all tracked non-terminal sessions against live processes
         VerifyTrackedSessions(state);
 
         // Step 2: Gather all matching issues from configured rules
-        var desiredDispatches = ComputeDesiredDispatches(config);
+        var (desiredDispatches, queriedRepos) = ComputeDesiredDispatches(config);
 
         // Step 3: Reconcile desired vs observed
-        ReconcileDesiredVsObserved(config, state, desiredDispatches);
+        ReconcileDesiredVsObserved(config, state, desiredDispatches, queriedRepos);
 
-        // Step 4: Dispatch pending sessions
+        // Step 4: Dispatch pending sessions (respects MaxInstances)
         DispatchPendingSessions(config, state);
 
         // Step 5: Persist corrected state
@@ -60,6 +63,27 @@ public sealed class ReconciliationEngine
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Running),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Pending),
             state.Sessions.Values.Count(s => s.IsTerminal));
+    }
+
+    /// <summary>
+    /// Step 0: Remove terminal sessions older than 7 days to prevent unbounded growth.
+    /// </summary>
+    private void PruneTerminalSessions(DaemonState state)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-7);
+        var toRemove = state.Sessions
+            .Where(kv => kv.Value.IsTerminal && kv.Value.UpdatedAt < cutoff)
+            .Select(kv => kv.Key)
+            .ToList();
+
+        foreach (var key in toRemove)
+        {
+            state.Sessions.Remove(key);
+            _logger.LogDebug("Pruned terminal session {Key}", key);
+        }
+
+        if (toRemove.Count > 0)
+            _logger.LogInformation("Pruned {Count} terminal session(s) older than 7 days", toRemove.Count);
     }
 
     /// <summary>
@@ -103,11 +127,15 @@ public sealed class ReconciliationEngine
 
     /// <summary>
     /// Step 2: Query GitHub for all issues that currently match configured rules.
-    /// Returns a set of issue keys that should have active dispatches.
+    /// Returns the desired dispatches and the set of repos that were successfully queried.
+    /// Only repos in the queried set should be used for termination decisions — if a repo
+    /// query fails, existing sessions for that repo are preserved.
     /// </summary>
-    private Dictionary<string, (GitHubIssue Issue, string RuleName)> ComputeDesiredDispatches(CopilotdConfig config)
+    private (Dictionary<string, (GitHubIssue Issue, string RuleName)> Desired, HashSet<string> QueriedRepos)
+        ComputeDesiredDispatches(CopilotdConfig config)
     {
         var desired = new Dictionary<string, (GitHubIssue, string)>(StringComparer.OrdinalIgnoreCase);
+        var queriedRepos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (ruleName, rule) in config.Rules)
         {
@@ -116,6 +144,8 @@ public sealed class ReconciliationEngine
                 try
                 {
                     var issues = _ghCli.QueryIssues(repo, rule);
+                    queriedRepos.Add(repo);
+
                     foreach (var issue in issues)
                     {
                         // Double-check rule match (gh filters are best-effort)
@@ -131,27 +161,32 @@ public sealed class ReconciliationEngine
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Error querying issues for {Repo} with rule '{Rule}'", repo, ruleName);
+                    _logger.LogWarning(ex, "Error querying issues for {Repo} with rule '{Rule}', preserving existing sessions", repo, ruleName);
                 }
             }
         }
 
-        _logger.LogInformation("Found {Count} issues matching configured rules", desired.Count);
-        return desired;
+        _logger.LogInformation("Found {Count} issues matching configured rules ({Queried}/{Total} repos queried successfully)",
+            desired.Count, queriedRepos.Count,
+            config.Rules.Values.SelectMany(r => r.Repos).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        return (desired, queriedRepos);
     }
 
     /// <summary>
     /// Step 3: Compare desired dispatches against tracked sessions.
     /// - Issues without active sessions → create pending
-    /// - Tracked sessions whose issues no longer match → mark completed
+    /// - Tracked sessions whose issues no longer match (and repo was queried) → mark completed
     /// - Orphaned sessions for still-matching issues → re-dispatch if retries remain
+    /// - Completed sessions for still-matching issues → re-dispatch with new session ID
     /// </summary>
     private void ReconcileDesiredVsObserved(
         CopilotdConfig config,
         DaemonState state,
-        Dictionary<string, (GitHubIssue Issue, string RuleName)> desired)
+        Dictionary<string, (GitHubIssue Issue, string RuleName)> desired,
+        HashSet<string> queriedRepos)
     {
-        // Handle sessions for issues that no longer match
+        // Handle sessions for issues that no longer match — only for successfully queried repos
+        var toTerminate = new List<DispatchSession>();
         foreach (var (key, session) in state.Sessions)
         {
             if (session.IsTerminal)
@@ -159,8 +194,29 @@ public sealed class ReconciliationEngine
 
             if (!desired.ContainsKey(key))
             {
+                // Only terminate if the session's repo was successfully queried.
+                // If the repo query failed, we don't know if the issue still matches.
+                if (!queriedRepos.Contains(session.Repo))
+                {
+                    _logger.LogDebug("Repo {Repo} query failed, preserving session {Key}", session.Repo, key);
+                    continue;
+                }
+
                 _logger.LogInformation("Issue {Key} no longer matches rules, terminating session", key);
+                toTerminate.Add(session);
+            }
+        }
+
+        // Terminate in parallel to avoid N×20s blocking
+        if (toTerminate.Count > 0)
+        {
+            Parallel.ForEach(toTerminate, new ParallelOptions { MaxDegreeOfParallelism = 4 }, session =>
+            {
                 _processManager.TerminateProcess(session);
+            });
+
+            foreach (var session in toTerminate)
+            {
                 session.Status = SessionStatus.Completed;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
             }
@@ -188,6 +244,7 @@ public sealed class ReconciliationEngine
                         existing.ProcessId = null;
                         existing.ProcessStartTime = null;
                         existing.UpdatedAt = DateTimeOffset.UtcNow;
+                        existing.LastFailureAt = DateTimeOffset.UtcNow;
                         continue;
 
                     case SessionStatus.Orphaned:
@@ -202,8 +259,13 @@ public sealed class ReconciliationEngine
                         continue;
 
                     case SessionStatus.Completed:
-                        // Issue re-appeared after completion — don't re-dispatch automatically
-                        _logger.LogDebug("Issue {Key} matches but session already completed, skipping", issueKey);
+                        // Issue re-appeared after completion — re-dispatch with a fresh session
+                        _logger.LogInformation("Issue {Key} re-matched after completion, re-dispatching", issueKey);
+                        existing.Status = SessionStatus.Pending;
+                        existing.CopilotSessionId = Guid.NewGuid().ToString();
+                        existing.ProcessId = null;
+                        existing.ProcessStartTime = null;
+                        existing.UpdatedAt = DateTimeOffset.UtcNow;
                         continue;
                 }
             }
@@ -227,15 +289,30 @@ public sealed class ReconciliationEngine
     }
 
     /// <summary>
-    /// Step 4: Launch copilot for all pending sessions.
+    /// Step 4: Launch copilot for pending sessions, respecting MaxInstances limit and retry backoff.
     /// </summary>
     private void DispatchPendingSessions(CopilotdConfig config, DaemonState state)
     {
+        var runningCount = state.Sessions.Values.Count(s => s.Status == SessionStatus.Running);
+        var availableSlots = Math.Max(0, config.MaxInstances - runningCount);
+
         var pending = state.Sessions.Values
             .Where(s => s.Status == SessionStatus.Pending)
+            .Where(s => !IsInBackoffWindow(s))
+            .OrderBy(s => s.CreatedAt)
             .ToList();
 
-        foreach (var session in pending)
+        if (pending.Count > 0 && availableSlots == 0)
+        {
+            _logger.LogInformation("{Count} session(s) queued but max instances ({Max}) reached",
+                pending.Count, config.MaxInstances);
+            return;
+        }
+
+        var toDispatch = pending.Take(availableSlots).ToList();
+        var skippedByLimit = pending.Count - toDispatch.Count;
+
+        foreach (var session in toDispatch)
         {
             session.Status = SessionStatus.Dispatching;
             session.UpdatedAt = DateTimeOffset.UtcNow;
@@ -253,9 +330,32 @@ public sealed class ReconciliationEngine
                 _logger.LogWarning("Failed to launch copilot for {Key}", session.IssueKey);
                 session.Status = SessionStatus.Failed;
                 session.RetryCount++;
+                session.LastFailureAt = DateTimeOffset.UtcNow;
                 session.UpdatedAt = DateTimeOffset.UtcNow;
             }
             // else: session was updated in-place by LaunchCopilot
+
+            // Save state after each launch to prevent ghost processes on crash
+            _stateStore.SaveState(state);
         }
+
+        if (skippedByLimit > 0)
+        {
+            _logger.LogInformation("{Count} session(s) still queued, waiting for instance slots", skippedByLimit);
+        }
+    }
+
+    /// <summary>
+    /// Returns true if a session should wait before retrying, using exponential backoff.
+    /// Backoff = min(2^RetryCount minutes, 30 minutes).
+    /// </summary>
+    private static bool IsInBackoffWindow(DispatchSession session)
+    {
+        if (session.RetryCount == 0 || session.LastFailureAt is null)
+            return false;
+
+        var backoffMinutes = Math.Min(Math.Pow(2, session.RetryCount), 30);
+        var backoff = TimeSpan.FromMinutes(backoffMinutes);
+        return DateTimeOffset.UtcNow - session.LastFailureAt.Value < backoff;
     }
 }

@@ -29,6 +29,7 @@ public static class ConfigCommand
                     ConsoleOutput.Info($"repo_home = {config.RepoHome ?? "(not set)"}");
                     ConsoleOutput.Info($"prompt = {config.Prompt}");
                     ConsoleOutput.Info($"current_user = {config.CurrentUser ?? "(not set)"}");
+                    ConsoleOutput.Info($"max_instances = {config.MaxInstances}");
                     ConsoleOutput.Info($"rules = {config.Rules.Count} rule(s)");
                     return 0;
                 }
@@ -62,9 +63,22 @@ public static class ConfigCommand
                         ConsoleOutput.Success("prompt updated.");
                         break;
 
+                    case "max_instances":
+                        if (int.TryParse(value, out var maxInst) && maxInst > 0)
+                        {
+                            cfg.MaxInstances = maxInst;
+                            ConsoleOutput.Success($"max_instances set to: {maxInst}");
+                        }
+                        else
+                        {
+                            ConsoleOutput.Error("max_instances must be a positive integer");
+                            return 1;
+                        }
+                        break;
+
                     default:
                         ConsoleOutput.Error($"Unknown config key: {key}");
-                        ConsoleOutput.Info("Valid keys: repo_home, prompt");
+                        ConsoleOutput.Info("Valid keys: repo_home, prompt, max_instances");
                         return 1;
                 }
 

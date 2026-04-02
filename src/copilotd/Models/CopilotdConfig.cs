@@ -24,6 +24,12 @@ public sealed class CopilotdConfig
     public string? CurrentUser { get; set; }
 
     /// <summary>
+    /// Maximum number of concurrent copilot instances. Sessions beyond this limit
+    /// are queued as Pending until a slot opens. Default is 3.
+    /// </summary>
+    public int MaxInstances { get; set; } = 3;
+
+    /// <summary>
     /// Named dispatch rules. Key is the rule name.
     /// </summary>
     public Dictionary<string, DispatchRule> Rules { get; set; } = new(StringComparer.OrdinalIgnoreCase);

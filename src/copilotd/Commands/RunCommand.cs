@@ -1,5 +1,6 @@
 using System.CommandLine;
 using Copilotd.Infrastructure;
+using Copilotd.Models;
 using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -26,6 +27,7 @@ public static class RunCommand
                 var copilotCli = services.GetRequiredService<CopilotCliService>();
                 var stateStore = services.GetRequiredService<StateStore>();
                 var reconciliation = services.GetRequiredService<ReconciliationEngine>();
+                var processManager = services.GetRequiredService<ProcessManager>();
 
                 var interval = parseResult.GetValue(intervalOption);
 
@@ -107,6 +109,23 @@ public static class RunCommand
                             ConsoleOutput.Error($"Poll cycle error: {ex.Message}");
                             // Continue running — only catastrophic errors should exit
                         }
+                    }
+
+                    // Gracefully terminate running sessions before exit
+                    state = stateStore.LoadState();
+                    var runningSessions = state.Sessions.Values
+                        .Where(s => s.Status == SessionStatus.Running)
+                        .ToList();
+                    if (runningSessions.Count > 0)
+                    {
+                        ConsoleOutput.Info($"Shutting down {runningSessions.Count} active copilot session(s)...");
+                        foreach (var session in runningSessions)
+                        {
+                            processManager.TerminateProcess(session);
+                            session.Status = SessionStatus.Completed;
+                            session.UpdatedAt = DateTimeOffset.UtcNow;
+                        }
+                        stateStore.SaveState(state);
                     }
 
                     ConsoleOutput.Info("copilotd daemon stopped.");

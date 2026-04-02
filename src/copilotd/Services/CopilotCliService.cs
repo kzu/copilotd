@@ -76,9 +76,13 @@ public sealed class CopilotCliService
         };
 
         using var process = Process.Start(psi)!;
+        var stderrTask = process.StandardError.ReadToEndAsync();
         var stdout = process.StandardOutput.ReadToEnd();
-        var stderr = process.StandardError.ReadToEnd();
-        process.WaitForExit(TimeSpan.FromSeconds(15));
+        if (!process.WaitForExit(TimeSpan.FromSeconds(15)))
+        {
+            try { process.Kill(); } catch { }
+        }
+        var stderr = stderrTask.GetAwaiter().GetResult();
 
         var output = string.IsNullOrEmpty(stdout) ? stderr : stdout;
         return (process.ExitCode, output);

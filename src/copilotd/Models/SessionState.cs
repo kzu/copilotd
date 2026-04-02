@@ -82,6 +82,9 @@ public sealed class DispatchSession
     /// <summary>Number of times this session has been re-dispatched after failure/orphan.</summary>
     public int RetryCount { get; set; }
 
+    /// <summary>When the last failure or orphan event occurred, for backoff calculation.</summary>
+    public DateTimeOffset? LastFailureAt { get; set; }
+
     /// <summary>Maximum retries before giving up (0 = unlimited).</summary>
     public const int MaxRetries = 3;
 
