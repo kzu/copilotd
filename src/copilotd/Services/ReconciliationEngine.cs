@@ -105,7 +105,10 @@ public sealed class ReconciliationEngine
             {
                 if (session.ProcessId is null)
                 {
-                    // No PID tracked yet (join just started), skip
+                    // No PID tracked — join process never saved it or state is stale
+                    _logger.LogInformation("Joined session {Key} has no tracked PID, resetting to Pending", key);
+                    session.Status = SessionStatus.Pending;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
                     continue;
                 }
 

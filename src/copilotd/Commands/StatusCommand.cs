@@ -59,6 +59,37 @@ public static class StatusCommand
                 ConsoleOutput.Info($"  Rules:     {config.Rules.Count}");
                 AnsiConsole.WriteLine();
 
+                // Recover stale Joined sessions — no PID or process dead
+                var processManager = services.GetRequiredService<ProcessManager>();
+                var stateChanged = false;
+                foreach (var (key, s) in state.Sessions)
+                {
+                    if (s.Status != SessionStatus.Joined)
+                        continue;
+
+                    var isStale = s.ProcessId is null;
+                    if (!isStale)
+                    {
+                        var liveness = processManager.CheckProcess(s);
+                        isStale = liveness is ProcessLivenessResult.Dead or ProcessLivenessResult.PidReused;
+                    }
+
+                    if (isStale)
+                    {
+                        s.Status = SessionStatus.Pending;
+                        s.ProcessId = null;
+                        s.ProcessStartTime = null;
+                        s.UpdatedAt = DateTimeOffset.UtcNow;
+                        stateChanged = true;
+                        ConsoleOutput.Warning($"Recovered stale joined session {key} → Pending");
+                    }
+                }
+                if (stateChanged)
+                {
+                    stateStore.SaveState(state);
+                    AnsiConsole.WriteLine();
+                }
+
                 // Sessions
                 var filterValue = parseResult.GetValue(filterOption);
                 var showAll = parseResult.GetValue(allOption);
