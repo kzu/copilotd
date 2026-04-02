@@ -119,6 +119,28 @@ public sealed class StateStore
         try { File.Delete(_lockPath); } catch { /* best effort */ }
     }
 
+    /// <summary>
+    /// Checks whether the daemon lock file is currently held by another process
+    /// without acquiring it. Returns true if a daemon instance is running.
+    /// </summary>
+    public bool IsLockHeld()
+    {
+        if (!File.Exists(_lockPath))
+            return false;
+
+        try
+        {
+            using var fs = new FileStream(_lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            // We were able to open it exclusively, so no daemon holds the lock
+            return false;
+        }
+        catch (IOException)
+        {
+            // Another process holds the lock
+            return true;
+        }
+    }
+
     // --- Helpers ---
 
     private static void AtomicWrite(string path, string content)

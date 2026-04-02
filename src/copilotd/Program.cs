@@ -22,7 +22,7 @@ public class Program
             rootCommand.Subcommands.Add(ConfigCommand.Create(services));
             rootCommand.Subcommands.Add(RulesCommand.Create(services));
             rootCommand.Subcommands.Add(RunCommand.Create(services));
-            rootCommand.Subcommands.Add(SessionsCommand.Create(services));
+            rootCommand.Subcommands.Add(StatusCommand.Create(services));
             rootCommand.Subcommands.Add(ShutdownInstanceCommand.Create());
 
             var parseResult = rootCommand.Parse(args, new ParserConfiguration());
