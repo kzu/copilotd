@@ -289,6 +289,12 @@ public sealed class ReconciliationEngine
                         continue;
 
                     case SessionStatus.Completed:
+                        // Don't re-dispatch if the session was explicitly completed by copilot
+                        if (existing.CompletedBySession)
+                        {
+                            _logger.LogDebug("Session {Key} was explicitly completed by copilot, skipping re-dispatch", issueKey);
+                            continue;
+                        }
                         // Issue re-appeared after completion — re-dispatch with a fresh session
                         _logger.LogInformation("Issue {Key} re-matched after completion, re-dispatching", issueKey);
                         existing.Status = SessionStatus.Pending;

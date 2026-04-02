@@ -88,6 +88,13 @@ public sealed class DispatchSession
     /// <summary>When the last failure or orphan event occurred, for backoff calculation.</summary>
     public DateTimeOffset? LastFailureAt { get; set; }
 
+    /// <summary>
+    /// True when the session was explicitly marked complete by the copilot session itself
+    /// (via 'copilotd session complete'). Prevents automatic re-dispatch even if the issue
+    /// still matches rules.
+    /// </summary>
+    public bool CompletedBySession { get; set; }
+
     /// <summary>Maximum retries before giving up (0 = unlimited).</summary>
     public const int MaxRetries = 3;
 

@@ -39,7 +39,9 @@ public sealed class CopilotdConfig
     public const string DefaultPrompt =
         "You are working on issue #$(issue.id) in the $(issue.repo) repository. " +
         "Read the issue details carefully and implement the requested changes. " +
-        "Follow the project's coding conventions and ensure all tests pass.";
+        "Follow the project's coding conventions and ensure all tests pass. " +
+        "When you have completed all the work for this issue, run " +
+        "`copilotd session complete $(issue.repo)#$(issue.id)` to mark the session as done.";
 }
 
 /// <summary>
