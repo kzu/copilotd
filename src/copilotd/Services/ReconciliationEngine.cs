@@ -99,6 +99,10 @@ public sealed class ReconciliationEngine
             if (session.Status is SessionStatus.Pending)
                 continue;
 
+            // Don't check liveness of user-controlled sessions
+            if (session.Status is SessionStatus.Joined)
+                continue;
+
             var result = _processManager.CheckProcess(session);
 
             switch (result)
@@ -192,6 +196,10 @@ public sealed class ReconciliationEngine
             if (session.IsTerminal)
                 continue;
 
+            // Never terminate user-controlled sessions
+            if (session.Status is SessionStatus.Joined)
+                continue;
+
             if (!desired.ContainsKey(key))
             {
                 // Only terminate if the session's repo was successfully queried.
@@ -232,7 +240,8 @@ public sealed class ReconciliationEngine
                     case SessionStatus.Running:
                     case SessionStatus.Dispatching:
                     case SessionStatus.Pending:
-                        // Already active, nothing to do
+                    case SessionStatus.Joined:
+                        // Already active or user-controlled, nothing to do
                         continue;
 
                     case SessionStatus.Orphaned when existing.CanRetry:

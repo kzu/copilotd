@@ -16,7 +16,7 @@ public static class StatusCommand
 
         var filterOption = new Option<string?>("--filter")
         {
-            Description = "Filter sessions by status (pending, dispatching, running, completed, failed, orphaned)"
+            Description = "Filter sessions by status (pending, dispatching, running, joined, completed, failed, orphaned)"
         };
         command.Options.Add(filterOption);
 
@@ -113,6 +113,7 @@ public static class StatusCommand
                     var statusMarkup = s.Status switch
                     {
                         SessionStatus.Running => $"[green]{s.Status}[/]",
+                        SessionStatus.Joined => $"[blue]{s.Status}[/]",
                         SessionStatus.Pending or SessionStatus.Dispatching => $"[yellow]{s.Status}[/]",
                         SessionStatus.Failed or SessionStatus.Orphaned => $"[red]{s.Status}[/]",
                         SessionStatus.Completed => $"[grey]{s.Status}[/]",
@@ -122,7 +123,7 @@ public static class StatusCommand
                     var pid = s.ProcessId?.ToString() ?? "-";
                     var sessionId = string.IsNullOrEmpty(s.CopilotSessionId)
                         ? "-"
-                        : s.CopilotSessionId[..Math.Min(8, s.CopilotSessionId.Length)];
+                        : s.CopilotSessionId;
 
                     table.AddRow(
                         Markup.Escape(s.IssueKey),

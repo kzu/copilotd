@@ -38,7 +38,10 @@ public enum SessionStatus
     Failed,
 
     /// <summary>State says running but process is gone (candidate for re-dispatch).</summary>
-    Orphaned
+    Orphaned,
+
+    /// <summary>User has taken over this session interactively via 'copilotd join'.</summary>
+    Joined
 }
 
 /// <summary>
