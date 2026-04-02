@@ -55,6 +55,10 @@ public static class JoinCommand
                     ConsoleOutput.Info($"Stopping orchestrated session for {issueKey} (PID {session.ProcessId})...");
                     processManager.TerminateProcess(session);
                 }
+                else if (session.Status is SessionStatus.Joined)
+                {
+                    ConsoleOutput.Info($"Session was previously joined but not cleaned up. Resuming...");
+                }
 
                 // Mark as Joined so the daemon doesn't interfere
                 session.Status = SessionStatus.Joined;
@@ -79,36 +83,36 @@ public static class JoinCommand
                     RedirectStandardError = false,
                 };
 
-                int exitCode;
-                using (var process = Process.Start(psi))
+                Process? interactiveProcess = null;
+                try
                 {
-                    if (process is null)
+                    interactiveProcess = Process.Start(psi);
+                    if (interactiveProcess is null)
                     {
                         ConsoleOutput.Error("Failed to launch copilot.");
-                        // Revert to Pending so daemon can re-dispatch
-                        session.Status = SessionStatus.Pending;
-                        session.UpdatedAt = DateTimeOffset.UtcNow;
-                        stateStore.SaveState(state);
+                        RequeueSession(stateStore, issueKey);
                         return 1;
                     }
 
-                    await process.WaitForExitAsync(CancellationToken.None);
-                    exitCode = process.ExitCode;
+                    await interactiveProcess.WaitForExitAsync(ct);
+                    var exitCode = interactiveProcess.ExitCode;
+
+                    Console.WriteLine();
+                    ConsoleOutput.Info($"Interactive session exited (code {exitCode}).");
                 }
-
-                Console.WriteLine();
-                ConsoleOutput.Info($"Interactive session exited (code {exitCode}).");
-
-                // Re-queue as Pending so the daemon re-dispatches it
-                state = stateStore.LoadState();
-                if (state.Sessions.TryGetValue(issueKey, out var updated))
+                finally
                 {
-                    updated.Status = SessionStatus.Pending;
-                    updated.ProcessId = null;
-                    updated.ProcessStartTime = null;
-                    updated.UpdatedAt = DateTimeOffset.UtcNow;
-                    stateStore.SaveState(state);
-                    ConsoleOutput.Info("Session re-queued for orchestrated dispatch.");
+                    if (interactiveProcess is not null)
+                    {
+                        if (!interactiveProcess.HasExited)
+                        {
+                            try { interactiveProcess.Kill(entireProcessTree: true); } catch { }
+                        }
+                        interactiveProcess.Dispose();
+                    }
+
+                    // Always re-queue, even on cancellation or crash
+                    RequeueSession(stateStore, issueKey);
                 }
 
                 return 0;
@@ -116,5 +120,28 @@ public static class JoinCommand
         });
 
         return command;
+    }
+
+    private static void RequeueSession(StateStore stateStore, string issueKey)
+    {
+        try
+        {
+            var state = stateStore.LoadState();
+            if (state.Sessions.TryGetValue(issueKey, out var session) &&
+                session.Status == SessionStatus.Joined)
+            {
+                session.Status = SessionStatus.Pending;
+                session.ProcessId = null;
+                session.ProcessStartTime = null;
+                session.UpdatedAt = DateTimeOffset.UtcNow;
+                stateStore.SaveState(state);
+                ConsoleOutput.Info("Session re-queued for orchestrated dispatch.");
+            }
+        }
+        catch
+        {
+            // Best effort — if state save fails, the daemon's safety net
+            // will detect the stale Joined session and reset it
+        }
     }
 }

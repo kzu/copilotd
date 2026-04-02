@@ -99,9 +99,20 @@ public sealed class ReconciliationEngine
             if (session.Status is SessionStatus.Pending)
                 continue;
 
-            // Don't check liveness of user-controlled sessions
+            // Reset stale Joined sessions — if a join process crashed or was killed
+            // without cleanup, the session gets stuck. Reset after 1 hour.
             if (session.Status is SessionStatus.Joined)
+            {
+                var joinedAge = DateTimeOffset.UtcNow - session.UpdatedAt;
+                if (joinedAge > TimeSpan.FromHours(1))
+                {
+                    _logger.LogWarning("Session {Key} has been Joined for {Hours:F1}h with no active join process, resetting to Pending",
+                        key, joinedAge.TotalHours);
+                    session.Status = SessionStatus.Pending;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                }
                 continue;
+            }
 
             var result = _processManager.CheckProcess(session);
 
