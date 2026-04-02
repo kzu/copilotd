@@ -131,6 +131,11 @@ public static class InitCommand
                 ConsoleOutput.Success("Configuration saved successfully!");
                 ConsoleOutput.Info($"Config stored in: {stateStore.ConfigDir}");
 
+                AnsiConsole.WriteLine();
+                ConsoleOutput.Info("Next steps:");
+                AnsiConsole.MarkupLine("  Use [blue]copilotd rules[/] to manage dispatch rules and the repos they apply to.");
+                AnsiConsole.MarkupLine("  Run [blue]copilotd run[/] to start the monitoring loop.");
+
                 return 0;
             }, logger);
         });
