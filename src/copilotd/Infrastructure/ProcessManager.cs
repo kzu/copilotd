@@ -46,15 +46,16 @@ public sealed partial class ProcessManager
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                // Use CreateProcessW directly to set CREATE_NEW_CONSOLE, ensuring the
-                // copilot process gets its own console. This is required for graceful
-                // Ctrl+C termination to work without affecting the daemon's console.
+                // Use CreateProcessW directly to set CREATE_NEW_CONSOLE and
+                // CREATE_NEW_PROCESS_GROUP, ensuring the copilot process gets its own
+                // console and process group. This is required for graceful Ctrl+Break/C
+                // termination to work without affecting the daemon's console.
                 var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>() };
                 si.dwFlags = STARTF_USESHOWWINDOW;
                 si.wShowWindow = SW_HIDE;
 
                 var cmdLine = $"copilot {args}";
-                var flags = CREATE_NEW_CONSOLE;
+                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP;
 
                 if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
                     flags, IntPtr.Zero, repoPath, ref si, out var pi))
@@ -162,9 +163,11 @@ public sealed partial class ProcessManager
     }
 
     /// <summary>
-    /// Gracefully terminates the process associated with a dispatch session by sending
-    /// two interrupt signals (SIGINT on Unix, Ctrl+C on Windows) with a delay between them.
-    /// Falls back to a hard kill if the process doesn't exit within the timeout.
+    /// Gracefully terminates the process associated with a dispatch session.
+    /// On Windows, spawns a helper copilotd instance (shutdown-instance command) that attaches
+    /// to the target's console and sends interrupt signals — the daemon cannot do this directly
+    /// as FreeConsole disrupts ConPTY sessions.
+    /// On Unix, sends SIGINT directly, falling back to SIGKILL.
     /// Verifies PID + start time to avoid terminating an unrelated process after PID reuse.
     /// Returns true if the process was successfully terminated or was already dead.
     /// </summary>
@@ -207,30 +210,16 @@ public sealed partial class ProcessManager
                 return true;
             }
 
-            // Try graceful shutdown: send two interrupt signals with a delay
             _logger.LogInformation("Gracefully terminating copilot process {Pid} for {Key}", pid, session.IssueKey);
 
-            if (TrySendInterruptSignal(pid))
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
-                Thread.Sleep(SignalDelay);
-
-                if (!process.HasExited)
-                {
-                    _logger.LogDebug("Sending second interrupt signal to PID {Pid}", pid);
-                    TrySendInterruptSignal(pid);
-                }
-
-                if (process.WaitForExit(GracefulTimeout))
-                {
-                    _logger.LogInformation("Process {Pid} for {Key} exited gracefully", pid, session.IssueKey);
-                    return true;
-                }
+                return TerminateViaShutdownInstance(process, pid);
             }
-
-            // Fall back to hard kill
-            _logger.LogWarning("Graceful shutdown timed out for PID {Pid}, forcing termination", pid);
-            process.Kill(entireProcessTree: true);
-            return true;
+            else
+            {
+                return TerminateViaSignals(process, pid);
+            }
         }
         catch (Exception ex)
         {
@@ -244,77 +233,119 @@ public sealed partial class ProcessManager
     }
 
     /// <summary>
-    /// Sends an interrupt signal (SIGINT on Unix, Ctrl+C on Windows) to the specified process.
+    /// Windows: spawns 'copilotd shutdown-instance --pid PID' which handles the full
+    /// graceful shutdown lifecycle (Ctrl+Break → Ctrl+C → Kill) from a separate process
+    /// that can safely attach to the target's console.
     /// </summary>
-    private bool TrySendInterruptSignal(int pid)
+    private bool TerminateViaShutdownInstance(Process process, int pid)
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return TrySendCtrlCWindows(pid);
-        else
-            return TrySendSigintUnix(pid);
-    }
+        var copilotdPath = Environment.ProcessPath;
+        if (copilotdPath is null)
+        {
+            _logger.LogWarning("Cannot determine copilotd executable path, falling back to kill");
+            process.Kill(entireProcessTree: true);
+            return true;
+        }
 
-    /// <summary>
-    /// Sends Ctrl+C to a process on Windows by launching a short-lived helper process
-    /// that attaches to the target's console and sends the event. This avoids calling
-    /// FreeConsole on the daemon process which disrupts pseudo-console (ConPTY) sessions.
-    /// </summary>
-    private bool TrySendCtrlCWindows(int pid)
-    {
+        _logger.LogDebug("Spawning shutdown-instance helper for PID {Pid}", pid);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = copilotdPath,
+            Arguments = $"shutdown-instance --pid {pid}",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
         try
         {
-            // The helper process starts with no console (CREATE_NO_WINDOW via CreateNoWindow),
-            // attaches to the target's console, and sends Ctrl+C — completely isolated from
-            // the daemon's console.
-            var psi = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                Arguments = $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \""
-                    + "$k = Add-Type -MemberDefinition '"
-                    + "[DllImport(\\\"kernel32.dll\\\")] public static extern bool FreeConsole();"
-                    + "[DllImport(\\\"kernel32.dll\\\")] public static extern bool AttachConsole(uint p);"
-                    + "[DllImport(\\\"kernel32.dll\\\")] public static extern bool SetConsoleCtrlHandler(IntPtr h, bool a);"
-                    + "[DllImport(\\\"kernel32.dll\\\")] public static extern bool GenerateConsoleCtrlEvent(uint e, uint g);"
-                    + "' -Name K -Namespace W -PassThru;"
-                    + "[W.K]::FreeConsole();"
-                    + "[W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, $true);"
-                    + $"[W.K]::AttachConsole({pid});"
-                    + "[W.K]::GenerateConsoleCtrlEvent(0, 0)"
-                    + "\"",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
             using var helper = Process.Start(psi);
             if (helper is null)
             {
-                _logger.LogDebug("Failed to start Ctrl+C helper for PID {Pid}", pid);
-                return false;
+                _logger.LogWarning("Failed to start shutdown-instance helper, falling back to kill");
+                process.Kill(entireProcessTree: true);
+                return true;
             }
 
-            return helper.WaitForExit(TimeSpan.FromSeconds(10));
+            // The shutdown-instance command handles signals + kill fallback internally,
+            // so we just need to wait for it to complete
+            if (helper.WaitForExit(TimeSpan.FromSeconds(20)))
+            {
+                if (helper.ExitCode == 0)
+                {
+                    _logger.LogInformation("Process {Pid} terminated via shutdown-instance", pid);
+                    return true;
+                }
+
+                _logger.LogWarning("shutdown-instance exited with code {Code} for PID {Pid}", helper.ExitCode, pid);
+            }
+            else
+            {
+                _logger.LogWarning("shutdown-instance timed out for PID {Pid}", pid);
+                try { helper.Kill(); } catch { }
+            }
+
+            // Final fallback if shutdown-instance didn't fully clean up
+            if (!process.HasExited)
+            {
+                _logger.LogWarning("Forcing kill of PID {Pid} after shutdown-instance", pid);
+                process.Kill(entireProcessTree: true);
+            }
+
+            return true;
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Failed to send Ctrl+C to PID {Pid} via helper", pid);
-            return false;
+            _logger.LogWarning(ex, "shutdown-instance failed for PID {Pid}, falling back to kill", pid);
+            process.Kill(entireProcessTree: true);
+            return true;
         }
     }
 
     /// <summary>
-    /// Sends SIGINT to a process on Unix via libc kill().
+    /// Unix: sends SIGINT directly (twice with delay), falling back to SIGKILL.
+    /// No helper process needed — SIGINT works across process boundaries on Unix.
     /// </summary>
-    private bool TrySendSigintUnix(int pid)
+    private bool TerminateViaSignals(Process process, int pid)
     {
         try
         {
-            return sys_kill(pid, SIGINT) == 0;
+            _logger.LogDebug("Sending SIGINT to PID {Pid}", pid);
+            sys_kill(pid, SIGINT);
+
+            if (process.WaitForExit(SignalDelay))
+            {
+                _logger.LogInformation("Process {Pid} exited after first SIGINT", pid);
+                return true;
+            }
+
+            _logger.LogDebug("Sending second SIGINT to PID {Pid}", pid);
+            sys_kill(pid, SIGINT);
+
+            if (process.WaitForExit(GracefulTimeout))
+            {
+                _logger.LogInformation("Process {Pid} exited after second SIGINT", pid);
+                return true;
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Failed to send SIGINT to PID {Pid}", pid);
-            return false;
+            _logger.LogDebug(ex, "Error sending SIGINT to PID {Pid}", pid);
         }
+
+        // Fall back to SIGKILL
+        _logger.LogWarning("Graceful shutdown timed out for PID {Pid}, sending SIGKILL", pid);
+        try
+        {
+            sys_kill(pid, SIGKILL);
+            process.WaitForExit(TimeSpan.FromSeconds(5));
+        }
+        catch
+        {
+            process.Kill(entireProcessTree: true);
+        }
+
+        return true;
     }
 
     private static string BuildPrompt(CopilotdConfig config, GitHubIssue issue, DispatchSession session)
@@ -420,16 +451,17 @@ public sealed partial class ProcessManager
         public int dwThreadId;
     }
 
-    private const uint CTRL_C_EVENT = 0;
     private const uint CREATE_NEW_CONSOLE = 0x00000010;
+    private const uint CREATE_NEW_PROCESS_GROUP = 0x00000200;
     private const int STARTF_USESHOWWINDOW = 0x00000001;
     private const short SW_HIDE = 0;
 
-    // Unix signal API
+    // Unix signal APIs
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int sys_kill(int pid, int sig);
 
     private const int SIGINT = 2;
+    private const int SIGKILL = 9;
 
     #endregion
 }
