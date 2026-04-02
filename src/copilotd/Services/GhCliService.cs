@@ -11,6 +11,7 @@ namespace Copilotd.Services;
 public sealed class GhCliService
 {
     private readonly ILogger<GhCliService> _logger;
+    private bool _supportsTypeField = true;
 
     public GhCliService(ILogger<GhCliService> logger)
     {
@@ -92,7 +93,11 @@ public sealed class GhCliService
     /// </summary>
     public List<GitHubIssue> QueryIssues(string repo, DispatchRule rule)
     {
-        var args = $"issue list --repo {repo} --state open --json number,title,assignees,labels,milestone,type --limit 100";
+        var jsonFields = _supportsTypeField
+            ? "number,title,assignees,labels,milestone,type"
+            : "number,title,assignees,labels,milestone";
+
+        var args = $"issue list --repo {repo} --state open --json {jsonFields} --limit 100";
 
         if (rule.User is not null)
             args += $" --assignee {rule.User}";
@@ -104,6 +109,26 @@ public sealed class GhCliService
             args += $" --milestone \"{rule.Milestone}\"";
 
         var (exitCode, output) = RunGh(args);
+
+        // Fall back to querying without 'type' if gh doesn't support it
+        if (exitCode != 0 && _supportsTypeField && output.Contains("Unknown JSON field", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogDebug("gh CLI does not support 'type' JSON field, retrying without it");
+            _supportsTypeField = false;
+            args = $"issue list --repo {repo} --state open --json number,title,assignees,labels,milestone --limit 100";
+
+            if (rule.User is not null)
+                args += $" --assignee {rule.User}";
+
+            foreach (var label in rule.Labels)
+                args += $" --label \"{label}\"";
+
+            if (rule.Milestone is not null)
+                args += $" --milestone \"{rule.Milestone}\"";
+
+            (exitCode, output) = RunGh(args);
+        }
+
         if (exitCode != 0)
         {
             _logger.LogWarning("Failed to query issues for {Repo}: {Output}", repo, output);
