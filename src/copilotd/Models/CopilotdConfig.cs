@@ -1,0 +1,87 @@
+namespace Copilotd.Models;
+
+/// <summary>
+/// Top-level user-managed configuration persisted to ~/.copilotd/config.json.
+/// </summary>
+public sealed class CopilotdConfig
+{
+    public int SchemaVersion { get; set; } = 1;
+
+    /// <summary>
+    /// Root directory where repos are cloned, expecting &lt;org&gt;/&lt;repo_name&gt; sub-folders.
+    /// </summary>
+    public string? RepoHome { get; set; }
+
+    /// <summary>
+    /// Base prompt template for dispatched copilot sessions.
+    /// Supports tokens: $(issue.repo), $(issue.id), $(issue.type), $(issue.milestone).
+    /// </summary>
+    public string Prompt { get; set; } = DefaultPrompt;
+
+    /// <summary>
+    /// The GitHub username of the authenticated user (populated during init).
+    /// </summary>
+    public string? CurrentUser { get; set; }
+
+    /// <summary>
+    /// Named dispatch rules. Key is the rule name.
+    /// </summary>
+    public Dictionary<string, DispatchRule> Rules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public const string DefaultRuleName = "Default";
+
+    public const string DefaultPrompt =
+        "You are working on issue #$(issue.id) in the $(issue.repo) repository. " +
+        "Read the issue details carefully and implement the requested changes. " +
+        "Follow the project's coding conventions and ensure all tests pass.";
+}
+
+/// <summary>
+/// A named dispatch rule with match conditions and launch options.
+/// </summary>
+public sealed class DispatchRule
+{
+    /// <summary>Assigned user to match (null = any).</summary>
+    public string? User { get; set; }
+
+    /// <summary>Labels that must all be present on the issue.</summary>
+    public List<string> Labels { get; set; } = [];
+
+    /// <summary>Milestone the issue must belong to (null = any).</summary>
+    public string? Milestone { get; set; }
+
+    /// <summary>Issue type filter, e.g. "bug", "feature" (null = any).</summary>
+    public string? Type { get; set; }
+
+    /// <summary>Repositories this rule applies to (org/repo format).</summary>
+    public List<string> Repos { get; set; } = [];
+
+    // --- Launch options ---
+
+    /// <summary>Whether to pass --yolo (--allow-all) to copilot.</summary>
+    public bool Yolo { get; set; }
+
+    /// <summary>Extra prompt text appended when this rule triggers.</summary>
+    public string? ExtraPrompt { get; set; }
+
+    /// <summary>
+    /// Returns true if the given issue matches all conditions on this rule.
+    /// All conditions are logical AND.
+    /// </summary>
+    public bool Matches(GitHubIssue issue)
+    {
+        if (User is not null && !string.Equals(User, issue.Assignee, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (Labels.Count > 0 && !Labels.All(l => issue.Labels.Contains(l, StringComparer.OrdinalIgnoreCase)))
+            return false;
+
+        if (Milestone is not null && !string.Equals(Milestone, issue.Milestone, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (Type is not null && !string.Equals(Type, issue.Type, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return true;
+    }
+}

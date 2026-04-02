@@ -1,0 +1,131 @@
+using System.Text.Json;
+using Copilotd.Models;
+using Microsoft.Extensions.Logging;
+
+namespace Copilotd.Infrastructure;
+
+/// <summary>
+/// Handles atomic read/write of config.json and state.json under ~/.copilotd.
+/// Writes use temp-then-rename for crash safety. Corrupt/missing files are
+/// treated as empty (self-healing).
+/// </summary>
+public sealed class StateStore
+{
+    private readonly string _configDir;
+    private readonly string _configPath;
+    private readonly string _statePath;
+    private readonly string _lockPath;
+    private readonly ILogger<StateStore> _logger;
+
+    public string ConfigDir => _configDir;
+
+    public StateStore(ILogger<StateStore> logger)
+    {
+        _logger = logger;
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        _configDir = Path.Combine(home, ".copilotd");
+        _configPath = Path.Combine(_configDir, "config.json");
+        _statePath = Path.Combine(_configDir, "state.json");
+        _lockPath = Path.Combine(_configDir, ".lock");
+        Directory.CreateDirectory(_configDir);
+    }
+
+    public bool ConfigExists() => File.Exists(_configPath);
+
+    // --- Config ---
+
+    public CopilotdConfig LoadConfig()
+    {
+        if (!File.Exists(_configPath))
+        {
+            _logger.LogDebug("No config file found, returning defaults");
+            return new CopilotdConfig();
+        }
+
+        try
+        {
+            var json = File.ReadAllText(_configPath);
+            return JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.CopilotdConfig)
+                   ?? new CopilotdConfig();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Config file is corrupt or unreadable, returning defaults");
+            return new CopilotdConfig();
+        }
+    }
+
+    public void SaveConfig(CopilotdConfig config)
+    {
+        var json = JsonSerializer.Serialize(config, CopilotdJsonContext.Default.CopilotdConfig);
+        AtomicWrite(_configPath, json);
+        _logger.LogDebug("Config saved to {Path}", _configPath);
+    }
+
+    // --- State ---
+
+    public DaemonState LoadState()
+    {
+        if (!File.Exists(_statePath))
+        {
+            _logger.LogDebug("No state file found, returning empty state");
+            return new DaemonState();
+        }
+
+        try
+        {
+            var json = File.ReadAllText(_statePath);
+            return JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.DaemonState)
+                   ?? new DaemonState();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "State file is corrupt or unreadable, treating as empty state");
+            return new DaemonState();
+        }
+    }
+
+    public void SaveState(DaemonState state)
+    {
+        var json = JsonSerializer.Serialize(state, CopilotdJsonContext.Default.DaemonState);
+        AtomicWrite(_statePath, json);
+        _logger.LogDebug("State saved to {Path}", _statePath);
+    }
+
+    // --- Single-instance guard ---
+
+    private FileStream? _lockStream;
+
+    /// <summary>
+    /// Attempts to acquire an exclusive lock. Returns false if another instance holds it.
+    /// </summary>
+    public bool TryAcquireLock()
+    {
+        try
+        {
+            _lockStream = new FileStream(_lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    public void ReleaseLock()
+    {
+        _lockStream?.Dispose();
+        _lockStream = null;
+        try { File.Delete(_lockPath); } catch { /* best effort */ }
+    }
+
+    // --- Helpers ---
+
+    private static void AtomicWrite(string path, string content)
+    {
+        var dir = Path.GetDirectoryName(path)!;
+        var tmp = Path.Combine(dir, $".{Path.GetFileName(path)}.tmp");
+        File.WriteAllText(tmp, content);
+        File.Move(tmp, path, overwrite: true);
+    }
+}
