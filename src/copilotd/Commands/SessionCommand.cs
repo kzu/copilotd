@@ -18,6 +18,7 @@ public static class SessionCommand
         command.Subcommands.Add(CreateListCommand(services));
         command.Subcommands.Add(CreateJoinCommand(services));
         command.Subcommands.Add(CreateCompleteCommand(services));
+        command.Subcommands.Add(CreateResetCommand(services));
 
         // Default to list behavior when no subcommand is specified
         var filterOption = new Option<string?>("--filter")
@@ -250,6 +251,55 @@ public static class SessionCommand
                 stateStore.SaveState(state);
 
                 ConsoleOutput.Success($"Session for {issueKey} marked as completed.");
+                return 0;
+            }, logger);
+        });
+
+        return command;
+    }
+
+    // ---- reset subcommand ----
+
+    private static Command CreateResetCommand(IServiceProvider services)
+    {
+        var command = new Command("reset", "Reset a completed session so it can be re-dispatched");
+
+        var issueArg = new Argument<string>("issue") { Description = "Issue key to reset (e.g., owner/repo#123)" };
+        command.Arguments.Add(issueArg);
+
+        command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
+        {
+            var logger = services.GetRequiredService<ILogger<Program>>();
+            return await ConsoleOutput.RunWithErrorHandling(async () =>
+            {
+                var stateStore = services.GetRequiredService<StateStore>();
+                var state = stateStore.LoadState();
+
+                var issueKey = parseResult.GetValue(issueArg)!;
+
+                if (!state.Sessions.TryGetValue(issueKey, out var session))
+                {
+                    ConsoleOutput.Error($"No session found for '{issueKey}'.");
+                    return 1;
+                }
+
+                if (session.Status == SessionStatus.Pending)
+                {
+                    ConsoleOutput.Info($"Session for '{issueKey}' is already pending.");
+                    return 0;
+                }
+
+                session.Status = SessionStatus.Pending;
+                session.CompletedBySession = false;
+                session.CopilotSessionId = Guid.NewGuid().ToString();
+                session.ProcessId = null;
+                session.ProcessStartTime = null;
+                session.RetryCount = 0;
+                session.LastFailureAt = null;
+                session.UpdatedAt = DateTimeOffset.UtcNow;
+                stateStore.SaveState(state);
+
+                ConsoleOutput.Success($"Session for {issueKey} reset to pending (new session {session.CopilotSessionId}).");
                 return 0;
             }, logger);
         });

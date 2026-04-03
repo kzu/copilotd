@@ -49,6 +49,7 @@ Convenience scripts `copilotd.sh` and `copilotd.cmd` in the repo root run the pr
 | `copilotd session list` | List dispatched sessions with optional filtering |
 | `copilotd session join <issue>` | Take over a session interactively |
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
+| `copilotd session reset <issue>` | Reset a completed/failed session to pending for re-dispatch |
 | `copilotd config` | Display current configuration |
 | `copilotd config --set key=value` | Set a config value (`repo_home`, `prompt`, `max_instances`) |
 | `copilotd rules list` | List all dispatch rules |
@@ -150,7 +151,9 @@ Sessions can reach the **Completed** state in two ways:
 
 1. **Automatic** — the issue no longer matches dispatch rules (closed, label removed, etc.). The process is gracefully terminated. If the issue later re-matches, the session is re-dispatched.
 
-2. **Explicit** — the copilot session calls `copilotd session complete <issue>` when it finishes its work. This sets the `CompletedBySession` flag, which prevents automatic re-dispatch even if the issue still matches rules.
+2. **Explicit** — the copilot session calls `copilotd session complete <issue>` when it finishes its work. This sets the `CompletedBySession` flag, which prevents automatic re-dispatch while the issue still matches rules. If the issue later *stops matching* (e.g., label removed, issue closed) and then *re-matches* (e.g., label re-added, issue reopened), the flag is automatically cleared and the session is re-dispatched.
+
+3. **Manual reset** — use `copilotd session reset <issue>` to force a completed or failed session back to pending with a fresh session ID, regardless of the `CompletedBySession` flag.
 
 The default prompt instructs copilot sessions to call `copilotd session complete` when they finish their work.
 

@@ -214,6 +214,16 @@ public sealed class ReconciliationEngine
         var toTerminate = new List<DispatchSession>();
         foreach (var (key, session) in state.Sessions)
         {
+            // Clear CompletedBySession flag when the issue no longer matches rules,
+            // so that if the issue re-matches later it will be re-dispatched
+            if (session.Status == SessionStatus.Completed && session.CompletedBySession
+                && !desired.ContainsKey(key) && queriedRepos.Contains(session.Repo))
+            {
+                _logger.LogInformation("Issue {Key} no longer matches rules, clearing CompletedBySession flag", key);
+                session.CompletedBySession = false;
+                session.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+
             if (session.IsTerminal)
                 continue;
 
