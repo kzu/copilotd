@@ -14,7 +14,9 @@ public sealed class StateStore
     private readonly string _configDir;
     private readonly string _configPath;
     private readonly string _statePath;
+    private readonly string _updateStatePath;
     private readonly string _lockPath;
+    private readonly string _updateLockPath;
     private readonly string _pidPath;
     private readonly ILogger<StateStore> _logger;
 
@@ -29,7 +31,9 @@ public sealed class StateStore
         _configDir = Path.Combine(home, ".copilotd");
         _configPath = Path.Combine(_configDir, "config.json");
         _statePath = Path.Combine(_configDir, "state.json");
+        _updateStatePath = Path.Combine(_configDir, "update-state.json");
         _lockPath = Path.Combine(_configDir, ".lock");
+        _updateLockPath = Path.Combine(_configDir, ".update-lock");
         _pidPath = Path.Combine(_configDir, ".pid");
         Directory.CreateDirectory(_configDir);
     }
@@ -258,5 +262,153 @@ public sealed class StateStore
         var tmp = Path.Combine(dir, $".{Path.GetFileName(path)}.tmp");
         File.WriteAllText(tmp, content);
         File.Move(tmp, path, overwrite: true);
+    }
+
+    // --- Update state ---
+
+    public UpdateState LoadUpdateState()
+    {
+        if (!File.Exists(_updateStatePath))
+        {
+            _logger.LogDebug("No update state file found, returning defaults");
+            return new UpdateState();
+        }
+
+        try
+        {
+            var json = File.ReadAllText(_updateStatePath);
+            return JsonSerializer.Deserialize(json, CopilotdJsonContext.Default.UpdateState)
+                   ?? new UpdateState();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Update state file is corrupt or unreadable, returning defaults");
+            return new UpdateState();
+        }
+    }
+
+    public void SaveUpdateState(UpdateState state)
+    {
+        var json = JsonSerializer.Serialize(state, CopilotdJsonContext.Default.UpdateState);
+        AtomicWrite(_updateStatePath, json);
+        _logger.LogDebug("Update state saved to {Path}", _updateStatePath);
+    }
+
+    public void ClearUpdateState()
+    {
+        try { File.Delete(_updateStatePath); } catch { /* best effort */ }
+        _logger.LogDebug("Update state cleared");
+    }
+
+    // --- Update lock (separate from daemon lock) ---
+
+    private FileStream? _updateLockStream;
+
+    /// <summary>Maximum age of an update lock before it's considered stale.</summary>
+    private static readonly TimeSpan UpdateLockStaleThreshold = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// Acquires an exclusive lock for update operations. Prevents concurrent
+    /// updates from the daemon and manual <c>copilotd update</c> invocations.
+    /// If a stale lock is detected (holder process dead or lock too old), it is
+    /// automatically recovered to prevent terminal locked states.
+    /// </summary>
+    public bool TryAcquireUpdateLock()
+    {
+        try
+        {
+            _updateLockStream = new FileStream(_updateLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            WriteUpdateLockInfo();
+            return true;
+        }
+        catch (IOException)
+        {
+            // Lock is held — check if it's stale
+            if (IsUpdateLockStale())
+            {
+                _logger.LogWarning("Detected stale update lock, recovering");
+                try
+                {
+                    File.Delete(_updateLockPath);
+                    _updateLockStream = new FileStream(_updateLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    WriteUpdateLockInfo();
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to recover stale update lock");
+                }
+            }
+
+            return false;
+        }
+    }
+
+    public void ReleaseUpdateLock()
+    {
+        _updateLockStream?.Dispose();
+        _updateLockStream = null;
+        try { File.Delete(_updateLockPath); } catch { /* best effort */ }
+    }
+
+    private void WriteUpdateLockInfo()
+    {
+        try
+        {
+            if (_updateLockStream is null) return;
+            _updateLockStream.SetLength(0);
+            using var writer = new StreamWriter(_updateLockStream, leaveOpen: true);
+            writer.WriteLine(Environment.ProcessId);
+            writer.WriteLine(DateTimeOffset.UtcNow.ToString("O"));
+            writer.Flush();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to write update lock info");
+        }
+    }
+
+    /// <summary>
+    /// Checks whether the existing update lock file is stale by verifying:
+    /// 1. The lock holder process is no longer running, or
+    /// 2. The lock is older than the stale threshold.
+    /// </summary>
+    private bool IsUpdateLockStale()
+    {
+        try
+        {
+            if (!File.Exists(_updateLockPath))
+                return false;
+
+            // Check file age as a simple heuristic
+            var lockAge = DateTimeOffset.UtcNow - File.GetLastWriteTimeUtc(_updateLockPath);
+            if (lockAge > UpdateLockStaleThreshold)
+                return true;
+
+            // Try to read PID from the lock file and check if process is alive
+            var lines = File.ReadAllLines(_updateLockPath);
+            if (lines.Length >= 1 && int.TryParse(lines[0].Trim(), out var pid))
+            {
+                try
+                {
+                    var proc = System.Diagnostics.Process.GetProcessById(pid);
+                    // Process exists — lock is valid
+                    proc.Dispose();
+                    return false;
+                }
+                catch (ArgumentException)
+                {
+                    // Process not found — lock is stale
+                    return true;
+                }
+            }
+
+            // Can't determine — assume stale if file is old enough (>1 minute)
+            return lockAge > TimeSpan.FromMinutes(1);
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
