@@ -1,6 +1,6 @@
 # copilotd
 
-An orchestration daemon that watches configured GitHub repositories for issues matching dispatch rules and spawns [Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) sessions to work on them automatically.
+An orchestration daemon that watches configured GitHub repositories for issues matching dispatch rules and spawns remote-enabled [Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) sessions to work on them automatically.
 
 ## Features
 
