@@ -59,10 +59,11 @@ public sealed class ReconciliationEngine
         state.LastPollTime = DateTimeOffset.UtcNow;
         _stateStore.SaveState(state);
 
-        _logger.LogInformation("Reconciliation complete: {Active} active, {Pending} pending, {Waiting} waiting, {Terminal} terminal sessions",
+        _logger.LogInformation("Reconciliation complete: {Active} active, {Pending} pending, {Waiting} waiting, {WaitingForReview} waiting for review, {Terminal} terminal sessions",
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Running),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.Pending),
             state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForFeedback),
+            state.Sessions.Values.Count(s => s.Status == SessionStatus.WaitingForReview),
             state.Sessions.Values.Count(s => s.IsTerminal));
     }
 
@@ -107,8 +108,8 @@ public sealed class ReconciliationEngine
             if (session.Status is SessionStatus.Pending)
                 continue;
 
-            // WaitingForFeedback sessions have no running process — skip liveness check
-            if (session.Status is SessionStatus.WaitingForFeedback)
+            // WaitingForFeedback and WaitingForReview sessions have no running process — skip liveness check
+            if (session.Status is SessionStatus.WaitingForFeedback or SessionStatus.WaitingForReview)
                 continue;
 
             // For Joined sessions, check if the interactive process is still alive.
@@ -265,6 +266,17 @@ public sealed class ReconciliationEngine
                     continue;
                 }
 
+                // WaitingForReview sessions have no process to terminate
+                if (session.Status is SessionStatus.WaitingForReview)
+                {
+                    _logger.LogInformation("Issue {Key} no longer matches rules, completing PR review session", key);
+                    session.Status = SessionStatus.Completed;
+                    session.WaitingSince = null;
+                    session.UpdatedAt = DateTimeOffset.UtcNow;
+                    _processManager.CleanupWorktree(session, config, state);
+                    continue;
+                }
+
                 _logger.LogInformation("Issue {Key} no longer matches rules, terminating session", key);
                 toTerminate.Add(session);
             }
@@ -325,6 +337,9 @@ public sealed class ReconciliationEngine
                                 {
                                     _logger.LogInformation("Ignoring comment from non-collaborator {Author} on {Key} (trust_level=collaborators)",
                                         commentInfo.Author, issueKey);
+                                    // Advance WaitingSince past this comment so the next poll can find later trusted comments
+                                    existing.WaitingSince = commentInfo.CreatedAt;
+                                    existing.UpdatedAt = DateTimeOffset.UtcNow;
                                     continue;
                                 }
 
@@ -345,12 +360,122 @@ public sealed class ReconciliationEngine
                         }
                         continue;
 
+                    case SessionStatus.WaitingForReview:
+                        if (existing.PullRequestNumber is not null)
+                        {
+                            // Check if the PR has been merged or closed — auto-complete the session
+                            var prState = _ghCli.GetPullRequestState(existing.Repo, existing.PullRequestNumber.Value);
+                            if (prState is "MERGED" or "CLOSED")
+                            {
+                                _logger.LogInformation("PR #{Pr} for {Key} is {State}, completing session",
+                                    existing.PullRequestNumber, issueKey, prState);
+                                existing.Status = SessionStatus.Completed;
+                                existing.CompletedBySession = true;
+                                existing.WaitingSince = null;
+                                existing.ProcessId = null;
+                                existing.ProcessStartTime = null;
+                                existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                _processManager.CleanupWorktree(existing, config, state);
+                                continue;
+                            }
+
+                            // Check for new review comments on the PR
+                            if (existing.WaitingSince is not null)
+                            {
+                                var reviewInfo = _ghCli.GetNewPrReviewCommentSince(existing.Repo, existing.PullRequestNumber.Value, existing.WaitingSince.Value);
+                                if (reviewInfo is not null)
+                                {
+                                    // Check re-dispatch rate limit
+                                    if (existing.RedispatchCount >= config.MaxRedispatches)
+                                    {
+                                        _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                                            "Use 'copilotd session reset' to re-enable. Ignoring PR review from {Author}",
+                                            issueKey, config.MaxRedispatches, reviewInfo.Author);
+                                        continue;
+                                    }
+
+                                    // Check author trust level
+                                    var rule = config.Rules.GetValueOrDefault(existing.RuleName);
+                                    var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+
+                                    if (trustLevel == CommentTrustLevel.Collaborators
+                                        && !_ghCli.HasWriteAccess(existing.Repo, reviewInfo.Author))
+                                    {
+                                        _logger.LogInformation("Ignoring PR review from non-collaborator {Author} on {Key} (trust_level=collaborators)",
+                                            reviewInfo.Author, issueKey);
+                                        // Advance WaitingSince past this review so the next poll can find later trusted reviews
+                                        existing.WaitingSince = reviewInfo.CreatedAt;
+                                        existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                        continue;
+                                    }
+
+                                    _logger.LogInformation("New PR review from {Author} detected on PR #{Pr} for {Key}, re-dispatching session (redispatch {N}/{Max})",
+                                        reviewInfo.Author, existing.PullRequestNumber, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
+                                    // Keep same CopilotSessionId so --resume preserves context
+                                    existing.Status = SessionStatus.Pending;
+                                    existing.RedispatchCount++;
+                                    existing.WaitingSince = null;
+                                    existing.ProcessId = null;
+                                    existing.ProcessStartTime = null;
+                                    existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Also check for new issue comments (maintainer may respond on the issue)
+                        if (existing.WaitingSince is not null)
+                        {
+                            var issueCommentInfo = _ghCli.GetNewCommentSince(existing.Repo, existing.IssueNumber, existing.WaitingSince.Value);
+                            if (issueCommentInfo is not null)
+                            {
+                                // Check re-dispatch rate limit
+                                if (existing.RedispatchCount >= config.MaxRedispatches)
+                                {
+                                    _logger.LogWarning("Session {Key} has reached the maximum re-dispatch limit ({Max}). " +
+                                        "Use 'copilotd session reset' to re-enable. Ignoring issue comment from {Author}",
+                                        issueKey, config.MaxRedispatches, issueCommentInfo.Author);
+                                    continue;
+                                }
+
+                                // Check author trust level
+                                var rule = config.Rules.GetValueOrDefault(existing.RuleName);
+                                var trustLevel = rule?.TrustLevel ?? CommentTrustLevel.Collaborators;
+
+                                if (trustLevel == CommentTrustLevel.Collaborators
+                                    && !_ghCli.HasWriteAccess(existing.Repo, issueCommentInfo.Author))
+                                {
+                                    _logger.LogInformation("Ignoring issue comment from non-collaborator {Author} on {Key} while waiting for PR review (trust_level=collaborators)",
+                                        issueCommentInfo.Author, issueKey);
+                                    // Advance WaitingSince past this comment so the next poll can find later trusted comments
+                                    existing.WaitingSince = issueCommentInfo.CreatedAt;
+                                    existing.UpdatedAt = DateTimeOffset.UtcNow;
+                                    continue;
+                                }
+
+                                _logger.LogInformation("New issue comment from {Author} detected on {Key} while waiting for PR review, re-dispatching session (redispatch {N}/{Max})",
+                                    issueCommentInfo.Author, issueKey, existing.RedispatchCount + 1, config.MaxRedispatches);
+                                existing.Status = SessionStatus.Pending;
+                                existing.RedispatchCount++;
+                                existing.WaitingSince = null;
+                                existing.ProcessId = null;
+                                existing.ProcessStartTime = null;
+                                existing.UpdatedAt = DateTimeOffset.UtcNow;
+                            }
+                            else
+                            {
+                                _logger.LogDebug("Session {Key} still waiting for PR review feedback", issueKey);
+                            }
+                        }
+                        continue;
+
                     case SessionStatus.Orphaned when existing.CanRetry:
                         _logger.LogInformation("Re-dispatching orphaned session {Key} (retry {N}/{Max})",
                             issueKey, existing.RetryCount + 1, DispatchSession.MaxRetries);
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
                         existing.RetryCount++;
+                        existing.PullRequestNumber = null;
                         existing.RedispatchCount = 0;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;
@@ -381,6 +506,7 @@ public sealed class ReconciliationEngine
                         _logger.LogInformation("Issue {Key} re-matched after completion, re-dispatching", issueKey);
                         _processManager.CleanupWorktree(existing, config, state);
                         existing.Status = SessionStatus.Pending;
+                        existing.PullRequestNumber = null;
                         existing.RedispatchCount = 0;
                         existing.CopilotSessionId = Guid.NewGuid().ToString();
                         existing.ProcessId = null;

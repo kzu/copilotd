@@ -357,7 +357,10 @@ public sealed partial class ProcessManager
 
     private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
     {
-        var prompt = CopilotdConfig.DefaultPrompt;
+        // Use a PR-specific prompt when re-dispatching for review feedback
+        var prompt = session.PullRequestNumber is not null
+            ? BuildPrReviewPrompt(issue, session)
+            : CopilotdConfig.DefaultPrompt;
 
         var rule = config.Rules.GetValueOrDefault(session.RuleName);
 
@@ -385,9 +388,38 @@ public sealed partial class ProcessManager
             .Replace("$(issue.repo)", issue.Repo)
             .Replace("$(issue.id)", issue.Number.ToString())
             .Replace("$(issue.type)", issue.Type ?? "issue")
-            .Replace("$(issue.milestone)", issue.Milestone ?? "none");
+            .Replace("$(issue.milestone)", issue.Milestone ?? "none")
+            .Replace("$(pr.id)", session.PullRequestNumber?.ToString() ?? "");
 
         return prompt;
+    }
+
+    /// <summary>
+    /// Builds a prompt for re-dispatching a session to address PR review feedback.
+    /// </summary>
+    private static string BuildPrReviewPrompt(GitHubIssue issue, DispatchSession session)
+    {
+        return $$"""
+            You are addressing review feedback on pull request #$(pr.id) in the $(issue.repo) repository.
+            This PR was created for issue #$(issue.id). Read the PR review comments carefully and address all feedback.
+
+            Important:
+            - You are on the same branch that was used to create the PR. Your changes will be pushed to the existing PR.
+            - Address each review comment by making the requested changes.
+            - If a review comment includes a suggested change (```suggestion block), apply it directly to the relevant file.
+            - After addressing all review feedback, push your changes to update the PR.
+            - Then run `copilotd session pr $(pr.id) $(issue.repo)#$(issue.id)` to continue monitoring for further review feedback.
+            - If the changes are complete and no more reviews are expected, run `copilotd session complete $(issue.repo)#$(issue.id)` instead.
+
+            Interacting with the PR:
+            - To post a general comment on the PR: `gh pr comment $(pr.id) --repo $(issue.repo) --body "Your comment"`
+            - To reply to a specific review thread, use `gh api graphql` with the addPullRequestReviewThreadReply mutation:
+              ```
+              gh api graphql -f query='mutation { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: "THREAD_ID", body: "Your reply" }) { comment { id } } }'
+              ```
+              You can find thread IDs by querying: `gh api graphql -f query='{ repository(owner: "OWNER", name: "REPO") { pullRequest(number: $(pr.id)) { reviewThreads(last: 20) { nodes { id isResolved comments(last: 5) { nodes { body author { login } } } } } } } }'`
+            - Do NOT use `copilotd session comment` to post to the issue when in PR review mode. All communication should happen on the PR itself.
+            """;
     }
 
     /// <summary>
@@ -475,9 +507,15 @@ public sealed partial class ProcessManager
     /// <summary>
     /// Creates a git worktree for the session on a new branch from the latest default branch.
     /// Layout: &lt;repo_home&gt;/org/repo_sessions/issue-N/
+    /// If the session already has a worktree (e.g., re-dispatching for PR review), refreshes it instead.
     /// </summary>
     public bool PrepareWorktree(DispatchSession session, CopilotdConfig config, DaemonState state)
     {
+        // If the session already has a worktree (PR review re-dispatch), refresh it
+        if (!string.IsNullOrEmpty(session.WorktreePath) && Directory.Exists(session.WorktreePath))
+        {
+            return RefreshWorktree(session);
+        }
         var mainRepoPath = _repoResolver.ResolveRepoPath(session.Repo, config, state);
         if (mainRepoPath is null || !Directory.Exists(mainRepoPath))
         {
@@ -551,6 +589,33 @@ public sealed partial class ProcessManager
 
         session.WorktreePath = worktreePath;
         _logger.LogInformation("Worktree ready for {Key} at {Path}", session.IssueKey, worktreePath);
+        return true;
+    }
+
+    /// <summary>
+    /// Refreshes an existing worktree by pulling the latest changes from origin.
+    /// Used when re-dispatching a session for PR review feedback.
+    /// </summary>
+    private bool RefreshWorktree(DispatchSession session)
+    {
+        var worktreePath = session.WorktreePath!;
+        _logger.LogInformation("Refreshing existing worktree for {Key} at {Path}", session.IssueKey, worktreePath);
+
+        // Fetch latest from origin
+        if (!RunGit(worktreePath, "fetch origin"))
+        {
+            _logger.LogWarning("Failed to fetch origin in worktree for {Key}", session.IssueKey);
+            return false;
+        }
+
+        // Pull latest changes (the branch may have been updated by the PR)
+        if (!RunGit(worktreePath, "pull --ff-only"))
+        {
+            _logger.LogWarning("Failed to pull latest changes in worktree for {Key}, continuing anyway", session.IssueKey);
+            // Non-fatal: the worktree may have local changes that prevent ff-only
+        }
+
+        _logger.LogInformation("Worktree refreshed for {Key} at {Path}", session.IssueKey, worktreePath);
         return true;
     }
 
