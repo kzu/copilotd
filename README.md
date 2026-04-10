@@ -103,6 +103,18 @@ copilotd rules update Default --delete-label copilotd --add-label dispatch
 
 # Add/remove repos from a rule
 copilotd rules update Default --add-repo "org/repo" --delete-repo "org/old-repo"
+
+# Only dispatch issues from specific authors
+copilotd rules add "Trusted" --add-author TimMan --add-author Rachael --repo "org/repo"
+
+# Only dispatch issues from authors with write access to the repo
+copilotd rules add "WriteOnly" --write-only-authors --repo "org/repo"
+
+# Update a rule to allow any author (clears author restrictions)
+copilotd rules update "Trusted" --any-author
+
+# Add/remove allowed authors on an existing rule
+copilotd rules update "Trusted" --add-author NewUser --delete-author OldUser
 ```
 
 ### Prompt templating
@@ -174,7 +186,7 @@ Each dispatched copilot session follows a state machine:
 | **Orphaned** | **Failed** | Max retries (3) exceeded |
 | **Failed** | **Pending** | Issue still matches and retry count < 3 |
 | **Joined** | **Pending** | User exits interactive session — automatically re-queued for dispatch |
-| **WaitingForFeedback** | **Pending** | New comment detected on the issue (not posted by copilotd) — re-dispatched with same session ID for `--resume` context continuity |
+| **WaitingForFeedback** | **Pending** | New comment detected from a trusted author (not posted by copilotd) — re-dispatched with same session ID for `--resume` context continuity. Author trust is controlled by `trust_level` rule setting |
 | **WaitingForFeedback** | **Completed** | Issue no longer matches rules while waiting |
 | **Completed** | **Pending** | Issue re-matches rules (e.g., reopened) — only if not explicitly completed by copilot |
 | Any non-terminal | **Completed** | Copilot calls `copilotd session complete` — sets `CompletedBySession` flag, prevents re-dispatch |
@@ -201,6 +213,23 @@ When a copilot session encounters an issue that needs more information before wo
 6. The model can then decide to start coding or ask further questions (multiple rounds supported)
 
 The default prompt instructs copilot sessions to use this flow when they need clarification.
+
+### Comment trust & security
+
+Issue and PR comments on public repositories can be posted by anyone, including users with no
+repository permissions. To prevent prompt injection attacks from untrusted commenters, copilotd
+enforces trust boundaries on comment-triggered re-dispatches:
+
+- **`trust_level: collaborators`** (default) — only comments from users with write/maintain/admin
+  access to the repository trigger re-dispatch. Comments from other users are logged and ignored.
+- **`trust_level: all`** — any non-bot comment triggers re-dispatch (less secure, opt-in).
+- **Re-dispatch rate limit** — sessions are limited to `max_redispatches` (default: 10)
+  comment-triggered re-dispatches. Use `copilotd session reset` to re-enable after hitting the limit.
+- **Security prompt** — when re-dispatching in response to comments, a security context is
+  automatically appended to the prompt warning copilot to treat comment content as potentially
+  untrusted input.
+
+Collaborator permission checks are cached for 15 minutes per user/repo pair to minimize API calls.
 
 ### Interactive takeover
 
@@ -234,6 +263,7 @@ Stored in `~/.copilotd/`:
 | `default_model` | *(none)* | Default model passed to copilot via `--model` for all sessions (rule-specific `model` overrides) |
 | `prompt` | *(empty)* | Custom prompt text appended to the built-in prompt |
 | `max_instances` | `3` | Maximum concurrent copilot processes; excess sessions queue as Pending |
+| `max_redispatches` | `10` | Maximum re-dispatches per session via comment/review feedback loops before requiring manual reset |
 
 ### Rule settings
 
@@ -244,6 +274,8 @@ Stored in `~/.copilotd/`:
 | `milestone` | *(any)* | Milestone the issue must belong to |
 | `type` | *(any)* | Issue type filter (e.g., `bug`, `feature`) |
 | `repos` | *(none)* | Repositories this rule applies to (`org/repo` format) |
+| `author_mode` | `any` | Issue author filtering: `any` (no filter), `allowed` (only listed authors), `writeAccess` (authors with write+ repo access) |
+| `authors` | *(none)* | Allowed issue authors when `author_mode` is `allowed` |
 | `yolo` | `false` | Pass `--yolo` to copilot (implies `allow_all_tools` and `allow_all_urls`) |
 | `allow_all_tools` | `true` | Pass `--allow-all-tools` to copilot |
 | `allow_all_urls` | `false` | Pass `--allow-all-urls` to copilot |
@@ -251,6 +283,7 @@ Stored in `~/.copilotd/`:
 | `extra_prompt` | *(none)* | Additional prompt text appended when this rule triggers |
 | `custom_prompt` | *(none)* | Per-rule custom prompt text (appended to or overrides global custom prompt) |
 | `custom_prompt_mode` | `append` | How rule custom prompt interacts with global: `append` or `override` |
+| `trust_level` | `collaborators` | Which comment authors can trigger session re-dispatch: `collaborators` (write access required) or `all` |
 
 Log files are written to `$TEMP/copilotd/logs/` with daily rollover.
 
