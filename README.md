@@ -14,7 +14,14 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 - **Interactive takeover** — join any orchestrated session interactively with `copilotd session join`, then hand it back automatically
 - **Cross-platform** — works on Windows, macOS, and Linux; publishes as native AOT
 
-## Install on Windows
+## Getting started
+
+### Prerequisites
+
+- [GitHub CLI (`gh`)](https://cli.github.com/) — authenticated via `gh auth login`
+- [Copilot CLI (`copilot`)](https://docs.github.com/copilot/how-tos/copilot-cli) — authenticated via `copilot login`
+
+### Install on Windows
 
 In a PowerShell terminal:
 
@@ -22,17 +29,19 @@ In a PowerShell terminal:
 iex (gh release download install-scripts -R DamianEdwards/copilotd -p install.ps1 -O - | Out-String)
 ```
 
-## Install on macOS or Linux
+## Install on macOS & Linux
 
 Grab the relevant executable asset from the latest [release](https://github.com/DamianEdwards/copilotd/releases).
 
-## Prerequisites
+## Running
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-- [GitHub CLI (`gh`)](https://cli.github.com/) — authenticated via `gh auth login`
-- [Copilot CLI (`copilot`)](https://docs.github.com/copilot/how-tos/copilot-cli) — authenticated via `copilot login`
+Run `copilotd init` to configure watched repos then run `copilotd run` to start the daemon. Run `copilotd --help` for other commands.
 
 ## Building from source
+
+### Prerequisites 
+
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 
 ```bash
 # Clone and build
