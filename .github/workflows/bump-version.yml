@@ -22,6 +22,10 @@ on:
           - rc
           - rtm
 
+concurrency:
+  group: dev-release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   DOTNET_NOLOGO: true
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true

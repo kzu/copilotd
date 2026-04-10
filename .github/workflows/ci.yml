@@ -7,7 +7,7 @@ on:
       - '**/*.md'
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: dev-release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
