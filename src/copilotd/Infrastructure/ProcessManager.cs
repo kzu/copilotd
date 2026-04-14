@@ -355,6 +355,298 @@ public sealed partial class ProcessManager
         return true;
     }
 
+    /// <summary>
+    /// Checks if the control session process is still alive.
+    /// </summary>
+    public ProcessLivenessResult CheckControlSession(ControlSessionInfo session)
+    {
+        if (session.ProcessId is not { } pid)
+            return ProcessLivenessResult.Dead;
+
+        try
+        {
+            var process = Process.GetProcessById(pid);
+
+            if (session.ProcessStartTime is { } expectedStart)
+            {
+                var actualStart = GetProcessStartTime(process);
+                if (actualStart is not null && Math.Abs((actualStart.Value - expectedStart).TotalSeconds) > 5)
+                {
+                    _logger.LogDebug("Control session PID {Pid} start time mismatch", pid);
+                    process.Dispose();
+                    return ProcessLivenessResult.PidReused;
+                }
+            }
+
+            var alive = !process.HasExited;
+            process.Dispose();
+            return alive ? ProcessLivenessResult.Alive : ProcessLivenessResult.Dead;
+        }
+        catch (ArgumentException)
+        {
+            return ProcessLivenessResult.Dead;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error checking control session process {Pid}", pid);
+            return ProcessLivenessResult.Dead;
+        }
+    }
+
+    /// <summary>
+    /// Launches the control remote session — a special <c>copilot --remote</c> session that
+    /// allows remote management of copilotd via the GitHub remote sessions UI.
+    /// Returns a populated <see cref="ControlSessionInfo"/> on success, or null on failure.
+    /// </summary>
+    public ControlSessionInfo? LaunchControlSession(CopilotdConfig config)
+    {
+        // Clone the copilotd repo to <RepoHome>/DamianEdwards/copilotd if needed.
+        // copilot --remote requires a cloned GitHub repo as the working directory.
+        var workingDir = EnsureControlSessionRepo(config);
+        if (workingDir is null)
+        {
+            _logger.LogError("Cannot launch control session: failed to set up copilotd repo clone");
+            return null;
+        }
+
+        var session = new ControlSessionInfo
+        {
+            CopilotSessionId = Guid.NewGuid().ToString("D"),
+            Status = ControlSessionStatus.Starting,
+            StartedAt = DateTimeOffset.UtcNow,
+        };
+
+        var args = BuildControlSessionArguments(CopilotdConfig.ControlSessionPrompt, config.DefaultModel);
+        _logger.LogInformation("Launching control session {SessionId}", session.CopilotSessionId);
+        _logger.LogDebug("copilot {Args}", args);
+
+        try
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>() };
+                si.dwFlags = STARTF_USESHOWWINDOW;
+                si.wShowWindow = SW_HIDE;
+
+                var cmdLine = $"copilot {args}";
+                var flags = CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP;
+
+                if (!CreateProcessW(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false,
+                    flags, IntPtr.Zero, workingDir, ref si, out var pi))
+                {
+                    _logger.LogError("CreateProcessW failed for control session (error: {Error})",
+                        Marshal.GetLastWin32Error());
+                    return null;
+                }
+
+                session.ProcessId = pi.dwProcessId;
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+
+                try
+                {
+                    using var proc = Process.GetProcessById(pi.dwProcessId);
+                    session.ProcessStartTime = GetProcessStartTime(proc);
+                }
+                catch
+                {
+                    session.ProcessStartTime = DateTimeOffset.UtcNow;
+                }
+            }
+            else
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "copilot",
+                    Arguments = args,
+                    WorkingDirectory = workingDir,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = false,
+                    RedirectStandardError = false,
+                    RedirectStandardInput = false,
+                    CreateNoWindow = true,
+                };
+
+                var process = Process.Start(psi);
+                if (process is null)
+                {
+                    _logger.LogError("Failed to start copilot process for control session");
+                    return null;
+                }
+
+                session.ProcessId = process.Id;
+                session.ProcessStartTime = GetProcessStartTime(process);
+                process.Dispose();
+            }
+
+            session.Status = ControlSessionStatus.Running;
+            _logger.LogInformation("Control session launched: PID={Pid}", session.ProcessId);
+            return session;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception launching control session");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Gracefully terminates the control session process.
+    /// </summary>
+    public bool TerminateControlSession(ControlSessionInfo session)
+    {
+        if (session.ProcessId is not { } pid)
+        {
+            _logger.LogDebug("No PID tracked for control session, nothing to terminate");
+            return true;
+        }
+
+        Process process;
+        try
+        {
+            process = Process.GetProcessById(pid);
+        }
+        catch (ArgumentException)
+        {
+            _logger.LogDebug("Control session process {Pid} not found, already exited", pid);
+            return true;
+        }
+
+        try
+        {
+            if (session.ProcessStartTime is { } expectedStart)
+            {
+                var actualStart = GetProcessStartTime(process);
+                if (actualStart is not null && Math.Abs((actualStart.Value - expectedStart).TotalSeconds) > 5)
+                {
+                    _logger.LogWarning("Control session PID {Pid} was reused by another process, skipping termination", pid);
+                    return true;
+                }
+            }
+
+            if (process.HasExited)
+            {
+                _logger.LogDebug("Control session process {Pid} already exited", pid);
+                return true;
+            }
+
+            _logger.LogInformation("Gracefully terminating control session process {Pid}", pid);
+
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return TerminateViaShutdownInstance(process, pid);
+            }
+            else
+            {
+                return TerminateViaSignals(process, pid);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to terminate control session process {Pid}", pid);
+            return false;
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    private static string BuildControlSessionArguments(string prompt, string? defaultModel)
+    {
+        var args = new List<string>
+        {
+            "--remote",
+            "-i", $"\"{EscapeArg(prompt)}\"",
+            // Only allow copilotd, gh, and git commands — no general shell access
+            "--allow-tool=shell(copilotd:*)",
+            "--allow-tool=shell(gh:*)",
+            "--allow-tool=shell(git:*)",
+        };
+
+        if (!string.IsNullOrWhiteSpace(defaultModel))
+        {
+            args.Add("--model");
+            args.Add($"\"{EscapeArg(defaultModel)}\"");
+        }
+
+        return string.Join(' ', args);
+    }
+
+    /// <summary>
+    /// The copilotd repo to clone for the control session's working directory.
+    /// </summary>
+    private const string ControlSessionRepo = "DamianEdwards/copilotd";
+
+    /// <summary>
+    /// Ensures the copilotd repo is cloned to <c>&lt;RepoHome&gt;/DamianEdwards/copilotd</c>
+    /// for use as the control session's working directory. Clones it if not already present.
+    /// </summary>
+    private string? EnsureControlSessionRepo(CopilotdConfig config)
+    {
+        if (string.IsNullOrEmpty(config.RepoHome))
+        {
+            _logger.LogError("RepoHome is not configured; cannot set up control session repo");
+            return null;
+        }
+
+        var repoPath = Path.Combine(config.RepoHome, "DamianEdwards", "copilotd");
+
+        if (Directory.Exists(Path.Combine(repoPath, ".git")))
+        {
+            _logger.LogDebug("Control session repo already exists at {Path}", repoPath);
+            return repoPath;
+        }
+
+        _logger.LogInformation("Cloning {Repo} for control session...", ControlSessionRepo);
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(repoPath)!);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "gh",
+                Arguments = $"repo clone {ControlSessionRepo} \"{repoPath}\"",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                _logger.LogError("Failed to start gh repo clone for control session");
+                return null;
+            }
+
+            process.WaitForExit(TimeSpan.FromSeconds(60));
+
+            if (!process.HasExited)
+            {
+                _logger.LogWarning("gh repo clone timed out for control session");
+                process.Kill(entireProcessTree: true);
+                return null;
+            }
+
+            if (process.ExitCode != 0)
+            {
+                var stderr = process.StandardError.ReadToEnd();
+                _logger.LogError("gh repo clone failed (exit {Code}): {Stderr}", process.ExitCode, stderr);
+                return null;
+            }
+
+            _logger.LogInformation("Cloned {Repo} to {Path}", ControlSessionRepo, repoPath);
+            return repoPath;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception cloning {Repo} for control session", ControlSessionRepo);
+            return null;
+        }
+    }
+
     private static string BuildPrompt(string globalCustomPrompt, GitHubIssue issue, DispatchSession session, CopilotdConfig config)
     {
         // Use a PR-specific prompt when re-dispatching for review feedback
