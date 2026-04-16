@@ -581,8 +581,7 @@ public static class SessionCommand
     /// Returns the exit code.
     /// </summary>
     public static int RenderSessionList(StateStore stateStore, ProcessManager processManager,
-        GitHubRemoteSessionUrlResolver remoteSessionUrls,
-        CopilotdConfig config, string? filterValue, bool showAll)
+        GitHubRemoteSessionUrlResolver remoteSessionUrls, CopilotdConfig config, string? filterValue, bool showAll)
     {
         var stateChanged = false;
         var state = stateStore.WithStateLock(() =>

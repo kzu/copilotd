@@ -20,7 +20,7 @@ public sealed class DaemonState
     public DateTimeOffset? LastPollTime { get; set; }
 
     /// <summary>
-    /// Cached resolved local paths for repos, keyed by repo slug ("org/repo").
+     /// Cached resolved local paths for repos, keyed by repo slug ("org/repo").
     /// Populated by <see cref="Infrastructure.RepoPathResolver"/> and validated on each use.
     /// </summary>
     public Dictionary<string, string> ResolvedRepoPaths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
@@ -217,4 +217,7 @@ public sealed class ControlSessionInfo
 
     /// <summary>When the control session was last started.</summary>
     public DateTimeOffset? StartedAt { get; set; }
+
+    /// <summary>When the control session status was last updated.</summary>
+    public DateTimeOffset? UpdatedAt { get; set; }
 }

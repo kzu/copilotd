@@ -83,10 +83,14 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | Command | Description |
 |---------|-------------|
 | `copilotd init` | Interactive first-run wizard (dependency checks with versions, auth, global config, rule setup, repo selection) |
-| `copilotd run` | Start the polling daemon |
-| `copilotd status` | Show daemon health, watched repos, the control session URL, and the session list |
-| `copilotd session` | List dispatched sessions and their GitHub remote session URLs (alias for `session list`) |
-| `copilotd session list` | List dispatched sessions with optional filtering and GitHub remote session URLs |
+| `copilotd run` | Start the polling daemon and print the current daemon log folder |
+| `copilotd start` | Start the daemon in the background and print the current daemon log folder |
+| `copilotd stop` | Stop the daemon and print the current daemon log folder |
+| `copilotd status` | Show daemon health, watched repos, the active daemon log folder, and the session list |
+| `copilotd logs` | Print the copilotd logs directory |
+| `copilotd logs clear [--days <n>]` | Clear log files, optionally only those older than the supplied age |
+| `copilotd session` | List dispatched sessions with their remote session URLs (alias for `session list`) |
+| `copilotd session list` | List dispatched sessions with optional filtering and remote session URLs |
 | `copilotd session join <issue>` | Take over a session interactively |
 | `copilotd session comment <issue>` | Post a comment on the issue and wait for feedback (callable from within a copilot session) |
 | `copilotd session complete <issue>` | Mark a session as completed (callable from within a copilot session) |
@@ -98,6 +102,8 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd rules add <name>` | Add a new dispatch rule |
 | `copilotd rules update <name>` | Update an existing rule |
 | `copilotd rules delete <name>` | Delete a rule (the `Default` rule cannot be deleted) |
+
+File logs live under `~/.copilotd/logs` by default (or `COPILOTD_HOME/logs`). Each daemon `run` instance gets its own `daemon_<uuid>` subfolder so its log files stay grouped together, while non-daemon commands log directly in the root logs directory with the same rolling-file behavior.
 
 ### Run options
 
@@ -345,6 +351,7 @@ Stored in `~/.copilotd/` by default. Set `COPILOTD_HOME` to point copilotd at a 
 - `state.json` — runtime session tracking (auto-managed, self-healing)
 - `update-state.json` — self-update staging and install coordination
 - `prompt.md` — optional global custom prompt text appended to the built-in prompt
+- `logs\` — daemon logs in `logs\daemon\` and per-invocation logs in `logs\`
 - `.lock` — single-instance guard (present while daemon is running)
 
 ### Config options
@@ -379,7 +386,13 @@ Stored in `~/.copilotd/` by default. Set `COPILOTD_HOME` to point copilotd at a 
 | `custom_prompt_mode` | `append` | How rule custom prompt interacts with global: `append` or `override` |
 | `trust_level` | `collaborators` | Which comment authors can trigger session re-dispatch: `collaborators` (write access required), `all`, `issueAuthor`, `assignees`, `issueAuthorAndCollaborators`, or `matchDispatchRule` |
 
-Log files are written to `$TEMP/copilotd/logs/` with daily rollover.
+File logs are written under `~/.copilotd/logs/` by default (or `COPILOTD_HOME\logs\` when `COPILOTD_HOME` is set):
+
+- Daemon logs live in `logs\daemon\`
+- Each control/dispatch session gets its own `logs\<session-uuid>\` folder
+- Log files roll daily and when they reach 10 MB
+- `copilotd status`, `copilotd session`, `copilotd run`, and `copilotd start` print the relevant log folders
+- Completed session log folders are automatically purged after 30 days, and you can purge older folders manually with `copilotd session logs purge --days <n>`
 
 ## Architecture
 

@@ -496,6 +496,7 @@ public sealed partial class ProcessManager
             CopilotSessionId = Guid.NewGuid().ToString("D"),
             Status = ControlSessionStatus.Starting,
             StartedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
         };
 
         var prompt = CopilotdConfig.ControlSessionPrompt
@@ -564,6 +565,7 @@ public sealed partial class ProcessManager
             }
 
             session.Status = ControlSessionStatus.Running;
+            session.UpdatedAt = DateTimeOffset.UtcNow;
             _logger.LogInformation("Control session launched: PID={Pid}", session.ProcessId);
             return session;
         }

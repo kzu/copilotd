@@ -3,22 +3,22 @@ using Microsoft.Extensions.Logging;
 namespace Copilotd.Infrastructure;
 
 /// <summary>
-/// Rolling file logger that writes to $TEMP/copilotd/logs.
-/// Rolls over daily and when files exceed 10 MB.
+/// Rolling file logger that writes under copilotd's home directory.
+/// Non-daemon invocations log directly under ~/.copilotd/logs and daemon run
+/// invocations log under ~/.copilotd/logs/daemon_&lt;uuid&gt;.
 /// </summary>
 public sealed class FileLoggerProvider : ILoggerProvider
 {
-    private readonly string _logDir;
+    private readonly LogFileManager _logFileManager;
     private readonly LogLevel _minLevel;
 
-    public FileLoggerProvider(LogLevel minLevel = LogLevel.Debug)
+    public FileLoggerProvider(LogFileManager logFileManager, LogLevel minLevel = LogLevel.Debug)
     {
+        _logFileManager = logFileManager;
         _minLevel = minLevel;
-        _logDir = Path.Combine(Path.GetTempPath(), "copilotd", "logs");
-        Directory.CreateDirectory(_logDir);
     }
 
-    public ILogger CreateLogger(string categoryName) => new FileLogger(categoryName, _logDir, _minLevel);
+    public ILogger CreateLogger(string categoryName) => new FileLogger(categoryName, _logFileManager, _minLevel);
 
     public void Dispose() { }
 }
@@ -26,14 +26,13 @@ public sealed class FileLoggerProvider : ILoggerProvider
 internal sealed class FileLogger : ILogger
 {
     private readonly string _category;
-    private readonly string _logDir;
+    private readonly LogFileManager _logFileManager;
     private readonly LogLevel _minLevel;
-    private const long MaxFileSize = 10 * 1024 * 1024; // 10 MB
 
-    public FileLogger(string category, string logDir, LogLevel minLevel)
+    public FileLogger(string category, LogFileManager logFileManager, LogLevel minLevel)
     {
         _category = category;
-        _logDir = logDir;
+        _logFileManager = logFileManager;
         _minLevel = minLevel;
     }
 
@@ -58,36 +57,12 @@ internal sealed class FileLogger : ILogger
 
         try
         {
-            var filePath = GetCurrentLogFile();
+            var filePath = _logFileManager.GetCurrentProcessLogFilePath();
             File.AppendAllText(filePath, line);
         }
         catch
         {
             // Swallow logging failures
         }
-    }
-
-    private string GetCurrentLogFile()
-    {
-        var date = DateTime.UtcNow.ToString("yyyy-MM-dd");
-        var basePath = Path.Combine(_logDir, $"copilotd-{date}.log");
-
-        // Check for rollover
-        if (File.Exists(basePath))
-        {
-            var info = new FileInfo(basePath);
-            if (info.Length >= MaxFileSize)
-            {
-                // Find next available rollover name
-                for (var i = 1; ; i++)
-                {
-                    var rolledPath = Path.Combine(_logDir, $"copilotd-{date}-{i}.log");
-                    if (!File.Exists(rolledPath) || new FileInfo(rolledPath).Length < MaxFileSize)
-                        return rolledPath;
-                }
-            }
-        }
-
-        return basePath;
     }
 }

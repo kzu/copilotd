@@ -3,6 +3,7 @@ using System.CommandLine.Parsing;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Copilotd.Infrastructure;
+using Copilotd.Models;
 using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -38,6 +39,7 @@ public static class StartCommand
                 var copilotCli = services.GetRequiredService<CopilotCliService>();
                 var stateStore = services.GetRequiredService<StateStore>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
+                var logFileManager = services.GetRequiredService<LogFileManager>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var logLevel = parseResult.GetValue(logLevelOption);
@@ -93,6 +95,7 @@ public static class StartCommand
                 // Poll until the daemon acquires the lock or the child dies
                 var deadline = DateTime.UtcNow + StartupTimeout;
                 var started = false;
+                string? daemonLogDirectory = null;
 
                 while (DateTime.UtcNow < deadline)
                 {
@@ -121,6 +124,8 @@ public static class StartCommand
                         var pidInfo = stateStore.ReadDaemonPid();
                         if (pidInfo is { } info && info.Pid == childPid)
                         {
+                            if (!string.IsNullOrWhiteSpace(info.LogInstanceId))
+                                daemonLogDirectory = logFileManager.GetDaemonLogDirectoryForDisplay(info.LogInstanceId);
                             started = true;
                             break;
                         }
@@ -142,6 +147,9 @@ public static class StartCommand
                 }
 
                 ConsoleOutput.Success($"copilotd daemon started in background (PID: {childPid}). Use '{runtimeContext.GetCopilotdCallbackCommand()} stop' to shut down.");
+                if (daemonLogDirectory is not null)
+                    ConsoleOutput.Info($"Daemon logs: {daemonLogDirectory}");
+
                 return 0;
             }, logger);
         });

@@ -34,9 +34,11 @@ public static class StatusCommand
                 var stateStore = services.GetRequiredService<StateStore>();
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
+                var logFileManager = services.GetRequiredService<LogFileManager>();
 
                 // Daemon status header
                 var daemonRunning = stateStore.IsLockHeld();
+                var daemonInfo = daemonRunning ? stateStore.ReadDaemonPid() : null;
                 var state = stateStore.LoadState();
                 var config = stateStore.LoadConfig();
 
@@ -59,6 +61,8 @@ public static class StatusCommand
                 }
 
                 ConsoleOutput.Info($"  Rules:     {config.Rules.Count}");
+                if (daemonInfo is { LogInstanceId: { Length: > 0 } daemonLogInstanceId })
+                    ConsoleOutput.Info($"  Logs:      {logFileManager.GetDaemonLogDirectoryForDisplay(daemonLogInstanceId)}");
 
                 // Control session status
                 if (state.ControlSession is not null)
@@ -84,6 +88,7 @@ public static class StatusCommand
                         ConsoleOutput.Info("  Remote:");
                         ConsoleOutput.Info($"    {controlUrl}");
                     }
+
                 }
                 else if (config.EnableControlSession)
                 {

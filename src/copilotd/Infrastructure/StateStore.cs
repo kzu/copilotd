@@ -20,14 +20,16 @@ public sealed class StateStore
     private readonly string _stateLockPath;
     private readonly string _updateLockPath;
     private readonly string _pidPath;
+    private readonly LogFileManager _logFileManager;
     private readonly ILogger<StateStore> _logger;
 
     public string ConfigDir => _configDir;
 
     private string PromptPath => Path.Combine(_configDir, "prompt.md");
 
-    public StateStore(ILogger<StateStore> logger)
+    public StateStore(LogFileManager logFileManager, ILogger<StateStore> logger)
     {
+        _logFileManager = logFileManager;
         _logger = logger;
         _configDir = CopilotdPaths.GetCopilotdHomeDirectory();
         _configPath = Path.Combine(_configDir, "config.json");
@@ -281,8 +283,16 @@ public sealed class StateStore
         try
         {
             var startTime = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime();
-            var content = $"{Environment.ProcessId}\n{startTime:O}";
-            File.WriteAllText(_pidPath, content);
+            var lines = new List<string>
+            {
+                Environment.ProcessId.ToString(),
+                startTime.ToString("O")
+            };
+
+            if (_logFileManager.CurrentDaemonInstanceId is { } daemonInstanceId)
+                lines.Add(daemonInstanceId);
+
+            AtomicWrite(_pidPath, string.Join(Environment.NewLine, lines));
             _logger.LogDebug("Wrote daemon PID {Pid} to {Path}", Environment.ProcessId, _pidPath);
         }
         catch (Exception ex)
@@ -295,7 +305,7 @@ public sealed class StateStore
     /// Reads the daemon PID and start time from the .pid file.
     /// Returns null if the file is missing, corrupt, or unreadable.
     /// </summary>
-    public (int Pid, DateTimeOffset StartTime)? ReadDaemonPid()
+    public (int Pid, DateTimeOffset StartTime, string? LogInstanceId)? ReadDaemonPid()
     {
         if (!File.Exists(_pidPath))
             return null;
@@ -307,7 +317,11 @@ public sealed class StateStore
                 && int.TryParse(lines[0].Trim(), out var pid)
                 && DateTimeOffset.TryParse(lines[1].Trim(), out var startTime))
             {
-                return (pid, startTime);
+                var logInstanceId = lines.Length >= 3 ? lines[2].Trim() : null;
+                if (string.IsNullOrWhiteSpace(logInstanceId))
+                    logInstanceId = null;
+
+                return (pid, startTime, logInstanceId);
             }
         }
         catch (Exception ex)

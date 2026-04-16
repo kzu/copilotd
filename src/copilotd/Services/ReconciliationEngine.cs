@@ -545,8 +545,7 @@ public sealed class ReconciliationEngine
             else
             {
                 // New issue, create pending session
-                _logger.LogInformation("New issue {Key} matched by rule '{Rule}', creating pending dispatch", issueKey, ruleName);
-                state.Sessions[issueKey] = new DispatchSession
+                var newSession = new DispatchSession
                 {
                     IssueKey = issueKey,
                     Repo = issue.Repo,
@@ -558,6 +557,9 @@ public sealed class ReconciliationEngine
                     CreatedAt = DateTimeOffset.UtcNow,
                     UpdatedAt = DateTimeOffset.UtcNow,
                 };
+                state.Sessions[issueKey] = newSession;
+
+                _logger.LogInformation("New issue {Key} matched by rule '{Rule}', creating pending dispatch", issueKey, ruleName);
             }
         }
     }

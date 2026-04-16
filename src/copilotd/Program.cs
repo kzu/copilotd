@@ -14,7 +14,7 @@ public class Program
         return await ConsoleOutput.RunWithErrorHandling(async () =>
         {
             var consoleLogLevel = ParseLogLevel(args);
-            var services = ConfigureServices(consoleLogLevel);
+            var services = ConfigureServices(consoleLogLevel, args);
             var runtimeContext = services.GetRequiredService<RuntimeContext>();
             var stateStore = services.GetRequiredService<StateStore>();
             var updateService = services.GetRequiredService<UpdateService>();
@@ -58,6 +58,7 @@ public class Program
             rootCommand.Subcommands.Add(StartCommand.Create(services));
             rootCommand.Subcommands.Add(StopCommand.Create(services));
             rootCommand.Subcommands.Add(StatusCommand.Create(services));
+            rootCommand.Subcommands.Add(LogsCommand.Create(services));
             rootCommand.Subcommands.Add(SessionCommand.Create(services));
             rootCommand.Subcommands.Add(UpdateCommand.Create(services));
             rootCommand.Subcommands.Add(ShutdownInstanceCommand.Create(services));
@@ -67,20 +68,16 @@ public class Program
         });
     }
 
-    private static IServiceProvider ConfigureServices(LogLevel? consoleLogLevel)
+    private static IServiceProvider ConfigureServices(LogLevel? consoleLogLevel, string[] args)
     {
         var serviceCollection = new ServiceCollection();
+        var daemonInstanceId = GetDaemonLogInstanceId(args);
 
-        serviceCollection.AddLogging(builder =>
-        {
-            builder.SetMinimumLevel(LogLevel.Debug);
-            builder.AddProvider(new FileLoggerProvider());
-
-            if (consoleLogLevel is { } level)
-            {
-                builder.AddProvider(new StderrLoggerProvider(level));
-            }
-        });
+        serviceCollection.AddSingleton(new LogFileManager(daemonInstanceId));
+        serviceCollection.AddLogging(builder => builder.SetMinimumLevel(LogLevel.Debug));
+        serviceCollection.AddSingleton<ILoggerProvider>(sp => new FileLoggerProvider(sp.GetRequiredService<LogFileManager>()));
+        if (consoleLogLevel is { } level)
+            serviceCollection.AddSingleton<ILoggerProvider>(_ => new StderrLoggerProvider(level));
 
         serviceCollection.AddSingleton<StateStore>();
         serviceCollection.AddSingleton<RepoPathResolver>();
@@ -96,6 +93,9 @@ public class Program
 
         return serviceCollection.BuildServiceProvider();
     }
+
+    private static string? GetDaemonLogInstanceId(string[] args)
+        => IsRunCommand(args) ? Guid.NewGuid().ToString("D") : null;
 
     private static LogLevel? ParseLogLevel(string[] args)
     {
@@ -157,6 +157,15 @@ public class Program
         var command = args.FirstOrDefault(a => !a.StartsWith('-'));
         return string.Equals(command, "run", StringComparison.OrdinalIgnoreCase)
             || string.Equals(command, "start", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsRunCommand(string[] args)
+    {
+        if (args.Any(IsHelpOrVersionArgument))
+            return false;
+
+        var command = args.FirstOrDefault(a => !a.StartsWith('-'));
+        return string.Equals(command, "run", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsHelpOrVersionArgument(string arg)
