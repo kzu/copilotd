@@ -14,6 +14,11 @@ public sealed record UpdateCheckResult(
     string ReleaseTag,
     bool IsDevBuild);
 
+public sealed record StartupRepairResult(
+    bool Succeeded,
+    string Message,
+    bool RelaunchRequired = false);
+
 /// <summary>
 /// Orchestrates the self-update lifecycle: check → download → verify → stage → install.
 /// </summary>
@@ -43,6 +48,162 @@ public sealed class UpdateService
         _releaseService = releaseService;
         _provenanceVerifier = provenanceVerifier;
         _logger = logger;
+    }
+
+    public static bool HasUsableStagedUpdate(UpdateState state)
+        => (state.Status == UpdateStatus.Staged || state.Status == UpdateStatus.WaitingForExit)
+           && !string.IsNullOrEmpty(state.StagedPath)
+           && File.Exists(state.StagedPath);
+
+    public bool TryScheduleDeferredInstall(int waitForPid, DateTimeOffset waitForStartTime, int watcherPid, DateTimeOffset? watcherStartTime)
+    {
+        if (!_stateStore.TryAcquireUpdateLock())
+        {
+            _logger.LogDebug("Another update operation is in progress, cannot record deferred installer state");
+            return false;
+        }
+
+        try
+        {
+            var state = _stateStore.LoadUpdateState();
+            if (!HasUsableStagedUpdate(state))
+            {
+                _logger.LogDebug("No staged update is available to defer");
+                return false;
+            }
+
+            state.Status = UpdateStatus.WaitingForExit;
+            state.WaitForPid = waitForPid;
+            state.WaitForStartTime = waitForStartTime;
+            state.WatcherPid = watcherPid;
+            state.WatcherStartTime = watcherStartTime;
+            state.ErrorMessage = null;
+            _stateStore.SaveUpdateState(state);
+            return true;
+        }
+        finally
+        {
+            _stateStore.ReleaseUpdateLock();
+        }
+    }
+
+    public async Task<StartupRepairResult?> RepairInterruptedInstallAsync(bool skipProvenance, CancellationToken ct)
+    {
+        if (!_stateStore.TryAcquireUpdateLock())
+        {
+            return new StartupRepairResult(
+                false,
+                "A self-update is already in progress. Wait for it to finish before starting copilotd.");
+        }
+
+        try
+        {
+        var currentExePath = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(currentExePath))
+            return null;
+
+        var installDir = Path.GetDirectoryName(currentExePath)!;
+        var binaryName = OperatingSystem.IsWindows() ? "copilotd.exe" : "copilotd";
+        var oldPath = Path.Combine(installDir, $"{binaryName}.old");
+        var defaultStagedPath = Path.Combine(installDir, $"{binaryName}.staged");
+
+        var state = _stateStore.LoadUpdateState();
+        if (state.Status != UpdateStatus.Installing)
+        {
+            if (!File.Exists(oldPath))
+                return null;
+
+            CleanupOldBinary();
+            return File.Exists(oldPath)
+                ? null
+                : new StartupRepairResult(true, "Cleaned up leftover backup binary from a previous self-update.");
+        }
+
+        if (string.IsNullOrWhiteSpace(state.StagedPath))
+        {
+            ClearInterruptedInstallArtifactsCore(defaultStagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                "Cleared interrupted self-update state because the staged path metadata was missing.");
+        }
+
+        var stagedPath = state.StagedPath;
+        if (!File.Exists(stagedPath))
+        {
+            ClearInterruptedInstallArtifactsCore(stagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                "Cleared interrupted self-update state because the staged binary was missing.");
+        }
+
+        var currentVersionString = VersionHelper.GetCurrentVersion();
+        if (currentVersionString is null || !VersionHelper.TryParse(currentVersionString, out var currentVersion))
+        {
+            ClearInterruptedInstallArtifactsCore(stagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                "Cleared interrupted self-update state because the current binary version could not be determined safely.");
+        }
+
+        if (string.IsNullOrWhiteSpace(state.StagedVersion)
+            || !VersionHelper.TryParse(state.StagedVersion, out var stagedVersion))
+        {
+            ClearInterruptedInstallArtifactsCore(stagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                "Cleared interrupted self-update state because the staged version metadata was invalid.");
+        }
+
+        if (stagedVersion.CompareTo(currentVersion) <= 0)
+        {
+            ClearInterruptedInstallArtifactsCore(stagedPath);
+            CleanupOldBinary();
+            return new StartupRepairResult(
+                true,
+                $"Discarded stale staged update {state.StagedVersion} because the current binary is already {currentVersionString} or newer.");
+        }
+
+        _logger.LogWarning(
+            "Resuming interrupted self-update install of {StagedVersion} over current binary {CurrentVersion}",
+            state.StagedVersion,
+            currentVersionString);
+
+        using var installWindowLock = _stateStore.TryAcquireInstallWindowLock();
+        if (installWindowLock is null)
+        {
+            return new StartupRepairResult(
+                false,
+                "Another copilotd instance started while startup repair was running. Retry the command after it exits.");
+        }
+
+        var installed = await InstallStagedCoreAsync(
+            skipProvenance,
+            waitForPid: null,
+            waitForStartTime: null,
+            allowDaemonShutdown: true,
+            ct);
+
+        if (installed)
+        {
+            return new StartupRepairResult(
+                true,
+                $"Recovered interrupted self-update install and applied staged version {state.StagedVersion}.",
+                RelaunchRequired: true);
+        }
+
+        var failedState = _stateStore.LoadUpdateState();
+        return new StartupRepairResult(
+            false,
+            $"Detected interrupted self-update install but automatic recovery failed: {failedState.ErrorMessage ?? "unknown error"}.");
+        }
+        finally
+        {
+            _stateStore.ReleaseUpdateLock();
+        }
     }
 
     /// <summary>
@@ -215,6 +376,7 @@ public sealed class UpdateService
             state.Status = UpdateStatus.Staged;
             state.StagedVersion = update.AvailableVersion;
             state.StagedPath = stagedPath;
+            ClearDeferredInstallMetadata(state);
             state.LastCheckTime = DateTimeOffset.UtcNow;
             state.ErrorMessage = null;
             state.FailureCount = 0;
@@ -241,28 +403,87 @@ public sealed class UpdateService
     /// Installs a previously staged binary. Called by <c>copilotd update --install-staged</c>.
     /// Waits for any running daemon to exit, then performs atomic binary replacement with rollback.
     /// </summary>
-    public async Task<bool> InstallStagedAsync(bool skipProvenance, CancellationToken ct)
+    public async Task<bool> InstallStagedAsync(
+        bool skipProvenance,
+        int? waitForPid,
+        DateTimeOffset? waitForStartTime,
+        bool allowDaemonShutdown,
+        CancellationToken ct)
     {
-        if (!_stateStore.TryAcquireUpdateLock())
+        var passiveWaitTarget = default((int Pid, DateTimeOffset StartTime)?);
+        if (!allowDaemonShutdown)
         {
-            _logger.LogWarning("Another update operation is in progress, cannot install staged update");
-            return false;
+            if (waitForPid is null || waitForStartTime is null)
+            {
+                _logger.LogWarning("Passive staged install requires an explicit daemon PID and start time");
+                return false;
+            }
+
+            passiveWaitTarget = (waitForPid.Value, waitForStartTime.Value);
         }
 
-        try
+        while (true)
         {
-            return await InstallStagedCoreAsync(skipProvenance, ct);
-        }
-        finally
-        {
-            _stateStore.ReleaseUpdateLock();
+            if (passiveWaitTarget is { } waitTarget
+                && !await WaitForDaemonChainToExitAsync(waitTarget.Pid, waitTarget.StartTime, ct))
+            {
+                return false;
+            }
+
+            if (!_stateStore.TryAcquireUpdateLock())
+            {
+                _logger.LogWarning("Another update operation is in progress, cannot install staged update");
+                return false;
+            }
+
+            FileStream? installWindowLock = null;
+            try
+            {
+                if (passiveWaitTarget is not null)
+                {
+                    installWindowLock = _stateStore.TryAcquireInstallWindowLock();
+                    if (installWindowLock is null)
+                    {
+                        var activeDaemon = _stateStore.ReadDaemonPid();
+                        if (activeDaemon is { } nextTarget)
+                        {
+                            _logger.LogInformation(
+                                "Daemon PID {Pid} started before deferred install could begin, continuing to wait for it to exit naturally",
+                                nextTarget.Pid);
+                            passiveWaitTarget = nextTarget;
+                        }
+                        else
+                        {
+                            _logger.LogInformation("A daemon started before deferred install could begin, retrying wait for the active instance");
+                        }
+
+                        await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                        continue;
+                    }
+                }
+
+                return await InstallStagedCoreAsync(skipProvenance, waitForPid, waitForStartTime, allowDaemonShutdown, ct);
+            }
+            finally
+            {
+                installWindowLock?.Dispose();
+                _stateStore.ReleaseUpdateLock();
+            }
         }
     }
 
-    private async Task<bool> InstallStagedCoreAsync(bool skipProvenance, CancellationToken ct)
+    private async Task<bool> InstallStagedCoreAsync(
+        bool skipProvenance,
+        int? waitForPid,
+        DateTimeOffset? waitForStartTime,
+        bool allowDaemonShutdown,
+        CancellationToken ct)
     {
         var state = _stateStore.LoadUpdateState();
-        if (state.Status != UpdateStatus.Staged || string.IsNullOrEmpty(state.StagedPath))
+        if ((state.Status != UpdateStatus.Staged
+             && state.Status != UpdateStatus.WaitingForExit
+             && state.Status != UpdateStatus.Installing)
+            || string.IsNullOrEmpty(state.StagedPath))
         {
             _logger.LogWarning("No staged update found to install");
             return false;
@@ -275,8 +496,41 @@ public sealed class UpdateService
             return false;
         }
 
+        if (allowDaemonShutdown)
+        {
+            var daemonPid = waitForPid is not null && waitForStartTime is not null
+                ? (Pid: waitForPid.Value, StartTime: waitForStartTime.Value)
+                : _stateStore.ReadDaemonPid();
+
+            if (daemonPid is not null)
+            {
+                _logger.LogInformation("Waiting for daemon (PID {Pid}) to exit...", daemonPid.Value.Pid);
+                if (!await WaitForProcessExitAsync(daemonPid.Value.Pid, daemonPid.Value.StartTime, DaemonExitTimeout, ct))
+                {
+                    // Try graceful shutdown first
+                    _logger.LogWarning("Daemon did not exit within timeout, attempting graceful shutdown");
+                    if (!TryGracefulShutdown(daemonPid.Value.Pid))
+                    {
+                        // Final fallback: force kill
+                        _logger.LogWarning("Graceful shutdown failed, force-killing daemon");
+                        try
+                        {
+                            var proc = System.Diagnostics.Process.GetProcessById(daemonPid.Value.Pid);
+                            proc.Kill(entireProcessTree: true);
+                            proc.WaitForExit(5000);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogDebug(ex, "Failed to terminate daemon process");
+                        }
+                    }
+                }
+            }
+        }
+
         state.Status = UpdateStatus.Installing;
         state.LastAttemptTime = DateTimeOffset.UtcNow;
+        ClearDeferredInstallMetadata(state);
         _stateStore.SaveUpdateState(state);
 
         // Re-verify provenance of staged binary before install
@@ -289,33 +543,6 @@ public sealed class UpdateService
                 {
                     RecordFailure(state, $"Pre-install provenance check failed: {trustErr}");
                     return false;
-                }
-            }
-        }
-
-        // Wait for daemon to exit
-        var daemonPid = _stateStore.ReadDaemonPid();
-        if (daemonPid is not null)
-        {
-            _logger.LogInformation("Waiting for daemon (PID {Pid}) to exit...", daemonPid.Value.Pid);
-            if (!await WaitForProcessExitAsync(daemonPid.Value.Pid, daemonPid.Value.StartTime, DaemonExitTimeout, ct))
-            {
-                // Try graceful shutdown first
-                _logger.LogWarning("Daemon did not exit within timeout, attempting graceful shutdown");
-                if (!TryGracefulShutdown(daemonPid.Value.Pid))
-                {
-                    // Final fallback: force kill
-                    _logger.LogWarning("Graceful shutdown failed, force-killing daemon");
-                    try
-                    {
-                        var proc = System.Diagnostics.Process.GetProcessById(daemonPid.Value.Pid);
-                        proc.Kill(entireProcessTree: true);
-                        proc.WaitForExit(5000);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogDebug(ex, "Failed to terminate daemon process");
-                    }
                 }
             }
         }
@@ -384,8 +611,8 @@ public sealed class UpdateService
     {
         var state = _stateStore.LoadUpdateState();
 
-        // Don't re-check if already staged
-        if (state.Status == UpdateStatus.Staged && !string.IsNullOrEmpty(state.StagedPath) && File.Exists(state.StagedPath))
+        // Don't re-check if already staged or waiting for a deferred install
+        if (HasUsableStagedUpdate(state))
         {
             _logger.LogDebug("Update already staged, skipping check");
             return true;
@@ -467,11 +694,91 @@ public sealed class UpdateService
     private void RecordFailure(UpdateState state, string message)
     {
         state.Status = UpdateStatus.Failed;
+        ClearDeferredInstallMetadata(state);
         state.ErrorMessage = message;
         state.FailureCount++;
         state.LastAttemptTime = DateTimeOffset.UtcNow;
         _stateStore.SaveUpdateState(state);
         _logger.LogWarning("Update failed (attempt #{Count}): {Message}", state.FailureCount, message);
+    }
+
+    private void ClearInterruptedInstallArtifacts(string stagedPath)
+    {
+        if (!_stateStore.TryAcquireUpdateLock())
+        {
+            _logger.LogWarning("Could not acquire the update lock to clear interrupted install artifacts");
+            return;
+        }
+
+        try
+        {
+            try
+            {
+                if (File.Exists(stagedPath))
+                    File.Delete(stagedPath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to delete stale staged binary '{Path}'", stagedPath);
+            }
+
+            _stateStore.ClearUpdateState();
+        }
+        finally
+        {
+            _stateStore.ReleaseUpdateLock();
+        }
+    }
+
+    private void ClearInterruptedInstallArtifactsCore(string stagedPath)
+    {
+        try
+        {
+            if (File.Exists(stagedPath))
+                File.Delete(stagedPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to delete stale staged binary '{Path}'", stagedPath);
+        }
+
+        _stateStore.ClearUpdateState();
+    }
+
+    private async Task<bool> WaitForDaemonChainToExitAsync(int initialPid, DateTimeOffset initialStartTime, CancellationToken ct)
+    {
+        var currentTarget = (Pid: initialPid, StartTime: initialStartTime);
+
+        while (true)
+        {
+            _logger.LogInformation("Waiting for daemon (PID {Pid}) to exit naturally before installing staged update...", currentTarget.Pid);
+            if (!await WaitForProcessExitAsync(currentTarget.Pid, currentTarget.StartTime, timeout: null, ct))
+                return false;
+
+            while (_stateStore.IsLockHeld())
+            {
+                var activeDaemon = _stateStore.ReadDaemonPid();
+                if (activeDaemon is null)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    continue;
+                }
+
+                if (IsSameTrackedProcess(activeDaemon.Value.Pid, activeDaemon.Value.StartTime, currentTarget.Pid, currentTarget.StartTime))
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                    continue;
+                }
+
+                currentTarget = activeDaemon.Value;
+                goto ContinueWaiting;
+            }
+
+            return true;
+
+        ContinueWaiting:
+            continue;
+        }
     }
 
     /// <summary>
@@ -607,11 +914,11 @@ public sealed class UpdateService
         return false;
     }
 
-    private static async Task<bool> WaitForProcessExitAsync(int pid, DateTimeOffset expectedStartTime, TimeSpan timeout, CancellationToken ct)
+    private static async Task<bool> WaitForProcessExitAsync(int pid, DateTimeOffset expectedStartTime, TimeSpan? timeout, CancellationToken ct)
     {
         try
         {
-            var proc = System.Diagnostics.Process.GetProcessById(pid);
+            using var proc = System.Diagnostics.Process.GetProcessById(pid);
 
             // Verify PID hasn't been reused by comparing start time
             var actualStart = proc.StartTime.ToUniversalTime();
@@ -622,9 +929,16 @@ public sealed class UpdateService
                 return true;
             }
 
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(timeout);
-            await proc.WaitForExitAsync(cts.Token);
+            if (timeout is { } finiteTimeout)
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(finiteTimeout);
+                await proc.WaitForExitAsync(cts.Token);
+            }
+            else
+            {
+                await proc.WaitForExitAsync(ct);
+            }
             return true;
         }
         catch (ArgumentException)
@@ -636,6 +950,17 @@ public sealed class UpdateService
         {
             return false;
         }
+    }
+
+    private static bool IsSameTrackedProcess(int pid, DateTimeOffset startTime, int expectedPid, DateTimeOffset expectedStartTime)
+        => pid == expectedPid && Math.Abs((startTime - expectedStartTime).TotalSeconds) <= 5;
+
+    private static void ClearDeferredInstallMetadata(UpdateState state)
+    {
+        state.WaitForPid = null;
+        state.WaitForStartTime = null;
+        state.WatcherPid = null;
+        state.WatcherStartTime = null;
     }
 
     private static string? GetExpectedHash(string checksumsPath, string assetName)
