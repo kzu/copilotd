@@ -15,6 +15,8 @@ public sealed partial class ProcessManager
 {
     private static readonly TimeSpan SignalDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan GracefulTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan WindowsCopilotChildDiscoveryTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan WindowsCopilotChildDiscoveryPollInterval = TimeSpan.FromMilliseconds(100);
 
     private readonly StateStore _stateStore;
     private readonly RepoPathResolver _repoResolver;
@@ -84,16 +86,11 @@ public sealed partial class ProcessManager
                 session.ProcessId = pi.dwProcessId;
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
-
-                try
+                AssignTrackedWindowsCopilotProcess(session.IssueKey, pi.dwProcessId, tracked =>
                 {
-                    using var proc = Process.GetProcessById(pi.dwProcessId);
-                    session.ProcessStartTime = GetProcessStartTime(proc);
-                }
-                catch
-                {
-                    session.ProcessStartTime = DateTimeOffset.UtcNow;
-                }
+                    session.ProcessId = tracked.ProcessId;
+                    session.ProcessStartTime = tracked.ProcessStartTime;
+                });
 
                 process = null; // Already tracked via PID
             }
@@ -303,8 +300,8 @@ public sealed partial class ProcessManager
     }
 
     /// <summary>
-    /// Windows: spawns 'copilotd shutdown-instance --pid PID' which handles the full
-    /// graceful shutdown lifecycle (Ctrl+C → Ctrl+C → Kill) from a separate process
+    /// Windows: spawns 'copilotd shutdown-instance --pid PID --signal-profile copilot'
+    /// which handles the full graceful shutdown lifecycle (Ctrl+C → 1s wait → Ctrl+C → Kill) from a separate process
     /// that can safely attach to the target's console.
     /// </summary>
     private bool TerminateViaShutdownInstance(Process process, int pid, DateTimeOffset? processStartTime)
@@ -381,7 +378,7 @@ public sealed partial class ProcessManager
     {
         var effectiveDelay = shutdownDelay < TimeSpan.Zero ? TimeSpan.Zero : shutdownDelay;
 
-        var arguments = $"shutdown-instance --pid {pid}";
+        var arguments = $"shutdown-instance --pid {pid} --signal-profile copilot";
         if (processStartTime is { } expectedStart)
             arguments += $" --expected-start {expectedStart:O}";
 
@@ -527,16 +524,11 @@ public sealed partial class ProcessManager
                 session.ProcessId = pi.dwProcessId;
                 CloseHandle(pi.hProcess);
                 CloseHandle(pi.hThread);
-
-                try
+                AssignTrackedWindowsCopilotProcess("control session", pi.dwProcessId, tracked =>
                 {
-                    using var proc = Process.GetProcessById(pi.dwProcessId);
-                    session.ProcessStartTime = GetProcessStartTime(proc);
-                }
-                catch
-                {
-                    session.ProcessStartTime = DateTimeOffset.UtcNow;
-                }
+                    session.ProcessId = tracked.ProcessId;
+                    session.ProcessStartTime = tracked.ProcessStartTime;
+                });
             }
             else
             {
@@ -841,6 +833,73 @@ public sealed partial class ProcessManager
             return null;
         }
     }
+
+    private void AssignTrackedWindowsCopilotProcess(
+        string processLabel,
+        int rootPid,
+        Action<(int ProcessId, DateTimeOffset ProcessStartTime)> assign)
+    {
+        var tracked = TryResolveTrackedWindowsCopilotProcess(rootPid);
+        if (tracked is { } trackedProcess)
+        {
+            assign(trackedProcess);
+
+            if (trackedProcess.ProcessId != rootPid)
+            {
+                _logger.LogDebug(
+                    "Tracking Windows child copilot PID {TrackedPid} instead of bootstrap PID {RootPid} for {ProcessLabel}",
+                    trackedProcess.ProcessId,
+                    rootPid,
+                    processLabel);
+            }
+
+            return;
+        }
+
+        try
+        {
+            using var proc = Process.GetProcessById(rootPid);
+            assign((rootPid, GetProcessStartTime(proc) ?? DateTimeOffset.UtcNow));
+        }
+        catch
+        {
+            assign((rootPid, DateTimeOffset.UtcNow));
+        }
+    }
+
+    private static (int ProcessId, DateTimeOffset ProcessStartTime)? TryResolveTrackedWindowsCopilotProcess(int rootPid)
+    {
+        if (!OperatingSystem.IsWindows())
+            return null;
+
+        var deadline = DateTime.UtcNow + WindowsCopilotChildDiscoveryTimeout;
+
+        while (true)
+        {
+            var trackedPid = FindDeepestWindowsCopilotDescendant(rootPid) ?? rootPid;
+
+            try
+            {
+                using var process = Process.GetProcessById(trackedPid);
+                var startTime = GetProcessStartTime(process) ?? DateTimeOffset.UtcNow;
+                if (trackedPid != rootPid || DateTime.UtcNow >= deadline)
+                    return (trackedPid, startTime);
+            }
+            catch
+            {
+                if (DateTime.UtcNow >= deadline)
+                    return null;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+                return null;
+
+            Thread.Sleep(WindowsCopilotChildDiscoveryPollInterval);
+        }
+    }
+
+    private static int? FindDeepestWindowsCopilotDescendant(int rootPid)
+        => NativeInterop.FindDeepestWindowsDescendantProcessId(rootPid, "copilot.exe");
 
     // ---- Worktree lifecycle ----
 
