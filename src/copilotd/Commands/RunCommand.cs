@@ -12,6 +12,9 @@ namespace Copilotd.Commands;
 
 public static class RunCommand
 {
+    private static readonly TimeSpan RemoteUrlResolveTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan RemoteUrlResolvePollInterval = TimeSpan.FromMilliseconds(500);
+
     public static Command Create(IServiceProvider services)
     {
         var command = new Command("run", "Start the copilotd daemon");
@@ -38,6 +41,7 @@ public static class RunCommand
                 var processManager = services.GetRequiredService<ProcessManager>();
                 var runtimeContext = services.GetRequiredService<RuntimeContext>();
                 var logFileManager = services.GetRequiredService<LogFileManager>();
+                var remoteSessionUrls = services.GetRequiredService<GitHubRemoteSessionUrlResolver>();
 
                 var interval = parseResult.GetValue(intervalOption);
                 var disableSelfUpdates = runtimeContext.IsAutomaticSelfUpdateDisabled(parseResult.GetValue(disableSelfUpdatesOption));
@@ -58,13 +62,44 @@ public static class RunCommand
                     return 1;
                 }
 
+                using var daemonCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                ConsoleCtrlHandler? consoleCtrlHandler = null;
+
                 try
                 {
-                    if (OperatingSystem.IsWindows() && !SetConsoleCtrlHandler(IntPtr.Zero, false))
+                    if (OperatingSystem.IsWindows())
                     {
-                        logger.LogWarning("Failed to re-enable Ctrl+C handling for the daemon console (Win32 error {Error})",
-                            Marshal.GetLastWin32Error());
+                        if (!SetConsoleCtrlHandler(IntPtr.Zero, false))
+                        {
+                            logger.LogWarning("Failed to re-enable Ctrl+C handling for the daemon console (Win32 error {Error})",
+                                Marshal.GetLastWin32Error());
+                        }
+
+                        consoleCtrlHandler = ctrlType =>
+                        {
+                            if (ctrlType is not (CTRL_C_EVENT or CTRL_BREAK_EVENT or CTRL_CLOSE_EVENT or CTRL_LOGOFF_EVENT or CTRL_SHUTDOWN_EVENT))
+                                return false;
+
+                            try
+                            {
+                                daemonCancellation.Cancel();
+                            }
+                            catch (ObjectDisposedException)
+                            {
+                            }
+
+                            return true;
+                        };
+
+                        if (!SetConsoleCtrlHandler(consoleCtrlHandler, true))
+                        {
+                            logger.LogWarning("Failed to register Windows shutdown handler for the daemon console (Win32 error {Error})",
+                                Marshal.GetLastWin32Error());
+                            consoleCtrlHandler = null;
+                        }
                     }
+
+                    var daemonCancellationToken = daemonCancellation.Token;
 
                     ConsoleOutput.Success($"copilotd daemon started (polling every {interval}s). Press Ctrl+C to stop.");
                     if (logFileManager.GetCurrentDaemonLogDirectoryForDisplay() is { } daemonLogDirectory)
@@ -79,7 +114,7 @@ public static class RunCommand
                     {
                         var state = stateStore.LoadState();
                         reconciliation.Reconcile(config, state);
-                    }, ct);
+                    }, daemonCancellationToken);
                     ConsoleOutput.Success("Startup reconciliation complete.");
 
                     // Launch control session if enabled
@@ -96,8 +131,12 @@ public static class RunCommand
                             var state = stateStore.LoadState();
 
                             var existingAlive = state.ControlSession is not null
-                                && state.ControlSession.Status == ControlSessionStatus.Running
-                                && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
+                                && IsControlSessionHealthy(
+                                    state.ControlSession,
+                                    processManager,
+                                    remoteSessionUrls,
+                                    config.CurrentUser,
+                                    DateTimeOffset.UtcNow);
 
                             if (existingAlive)
                             {
@@ -127,15 +166,27 @@ public static class RunCommand
                             }
 
                             stateStore.SaveState(state);
-                        }, ct);
+                        }, daemonCancellationToken);
 
                         if (existingControlPid is not null)
                         {
                             ConsoleOutput.Success($"Control session already running (PID {existingControlPid}).");
+                            await WriteControlSessionRemoteUrlAsync(
+                                remoteSessionUrls,
+                                existingControlSessionId,
+                                existingControlPid,
+                                config.CurrentUser,
+                                ct);
                         }
                         else if (launchedControlPid is not null)
                         {
                             ConsoleOutput.Success($"Control session launched (PID {launchedControlPid}).");
+                            await WriteControlSessionRemoteUrlAsync(
+                                remoteSessionUrls,
+                                launchedControlSessionId,
+                                launchedControlPid,
+                                config.CurrentUser,
+                                ct);
                         }
                         else if (launchFailed)
                         {
@@ -147,7 +198,7 @@ public static class RunCommand
                     // Ctrl+C handling, so observe it directly instead of waiting on a separate CTS.
                     var shutdownRequested = 0;
                     var processExitCleanupSuppressed = 0;
-                    using var shutdownRegistration = ct.Register(() =>
+                    using var shutdownRegistration = daemonCancellationToken.Register(() =>
                     {
                         if (Interlocked.Exchange(ref shutdownRequested, 1) != 0)
                             return;
@@ -167,13 +218,13 @@ public static class RunCommand
 
                     try
                     {
-                        while (!ct.IsCancellationRequested)
+                        while (!daemonCancellationToken.IsCancellationRequested)
                         {
                             try
                             {
-                                await Task.Delay(TimeSpan.FromSeconds(interval), ct);
+                                await Task.Delay(TimeSpan.FromSeconds(interval), daemonCancellationToken);
                             }
-                            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                            catch (OperationCanceledException) when (daemonCancellationToken.IsCancellationRequested)
                             {
                                 break;
                             }
@@ -191,13 +242,25 @@ public static class RunCommand
                                     if (config.EnableControlSession)
                                     {
                                         var controlAlive = state.ControlSession is not null
-                                            && state.ControlSession.Status == ControlSessionStatus.Running
-                                            && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive;
+                                            && IsControlSessionHealthy(
+                                                state.ControlSession,
+                                                processManager,
+                                                remoteSessionUrls,
+                                                config.CurrentUser,
+                                                DateTimeOffset.UtcNow);
 
                                         if (!controlAlive)
                                         {
                                             if (state.ControlSession?.ProcessId is not null)
+                                            {
+                                                if (state.ControlSession.Status == ControlSessionStatus.Running
+                                                    && processManager.CheckControlSession(state.ControlSession) == ProcessLivenessResult.Alive)
+                                                {
+                                                    logger.LogWarning("Control session is alive but has no resolvable remote URL; relaunching");
+                                                }
+
                                                 processManager.TerminateControlSession(state.ControlSession);
+                                            }
 
                                             logger.LogInformation("Relaunching control session...");
                                             var controlSession = processManager.LaunchControlSession(config);
@@ -230,7 +293,7 @@ public static class RunCommand
                                         state.ControlSession.UpdatedAt = DateTimeOffset.UtcNow;
                                         stateStore.SaveState(state);
                                     }
-                                }, ct);
+                                }, daemonCancellationToken);
 
                                 if (!disableSelfUpdates)
                                 {
@@ -255,17 +318,17 @@ public static class RunCommand
                                     {
                                         try
                                         {
-                                            await updateService.CheckAndStageAsync(
-                                                allowPreRelease: false,
-                                                skipProvenance: false,
-                                                ct);
-                                        }
-                                        catch (OperationCanceledException) { }
-                                        catch (Exception ex)
-                                        {
-                                            logger.LogDebug(ex, "Background update check failed");
-                                        }
-                                    }, ct);
+                                                await updateService.CheckAndStageAsync(
+                                                    allowPreRelease: false,
+                                                    skipProvenance: false,
+                                                    daemonCancellationToken);
+                                            }
+                                            catch (OperationCanceledException) { }
+                                            catch (Exception ex)
+                                            {
+                                                logger.LogDebug(ex, "Background update check failed");
+                                            }
+                                    }, daemonCancellationToken);
                                 }
                             }
                             catch (Exception ex)
@@ -297,6 +360,62 @@ public static class RunCommand
         });
 
         return command;
+    }
+
+    private static async Task WriteControlSessionRemoteUrlAsync(
+        GitHubRemoteSessionUrlResolver remoteSessionUrls,
+        string? sessionId,
+        int? processId,
+        string? currentUser,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+            return;
+
+        var url = remoteSessionUrls.TryResolve(sessionId, processId, currentUser);
+        var deadline = DateTimeOffset.UtcNow + RemoteUrlResolveTimeout;
+
+        while (url is null && DateTimeOffset.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(RemoteUrlResolvePollInterval, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            url = remoteSessionUrls.TryResolve(sessionId, processId, currentUser);
+        }
+
+        ConsoleOutput.Info("Remote:");
+        ConsoleOutput.Info($"  {url ?? "unavailable"}");
+    }
+
+    private static bool IsControlSessionHealthy(
+        ControlSessionInfo session,
+        ProcessManager processManager,
+        GitHubRemoteSessionUrlResolver remoteSessionUrls,
+        string? currentUser,
+        DateTimeOffset now)
+    {
+        if (session.Status != ControlSessionStatus.Running)
+            return false;
+
+        if (processManager.CheckControlSession(session) != ProcessLivenessResult.Alive)
+            return false;
+
+        if (remoteSessionUrls.TryResolve(session, currentUser) is not null)
+            return true;
+
+        return !HasRemoteUrlResolutionTimedOut(session, now);
+    }
+
+    private static bool HasRemoteUrlResolutionTimedOut(ControlSessionInfo session, DateTimeOffset now)
+    {
+        var startedAt = session.StartedAt ?? session.UpdatedAt;
+        return startedAt is { } started && now - started >= RemoteUrlResolveTimeout;
     }
 
     private static void CleanupTrackedProcesses(
