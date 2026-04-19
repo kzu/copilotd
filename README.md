@@ -13,7 +13,7 @@ An orchestration daemon that watches configured GitHub repositories for issues m
 - **Crash-resilient** — dispatched `copilot` sessions run as independent processes that survive daemon restarts; state is persisted atomically
 - **Interactive connection** — connect to any running remote-enabled session with `copilotd session connect` without stopping the orchestrated session (requires Copilot CLI 1.0.32+)
 - **Remote control session** — hosts a `copilot --remote` session for remotely managing copilotd via the GitHub remote sessions UI (web & mobile)
-- **Cross-platform** — works on Windows, macOS, and Linux; publishes as native AOT
+- **Cross-platform** — works on Windows, macOS, and Linux
 
 ## Getting started
 
