@@ -8,6 +8,10 @@ copilotd sits between GitHub Issues and the Copilot CLI running on your dev mach
 
 Available for Windows, macOS, and Linux.
 
+## Watch the introduction video
+
+[![Introducing copilotd](https://img.youtube.com/vi/zT6N_l12ofU/maxresdefault.jpg)](https://www.youtube.com/watch?v=zT6N_l12ofU)
+
 ## Features
 
 - **Issue watching** — polls GitHub repos for issues matching configurable rules (assigned user, labels, milestone, issue type)
