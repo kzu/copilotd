@@ -1,6 +1,12 @@
 # copilotd
 
-An orchestration daemon that watches configured GitHub repositories for issues matching dispatch rules and spawns remote-enabled [Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) sessions to work on them automatically.
+**copilotd** is an orchestration daemon that watches GitHub repos for issues matching configurable dispatch rules and automatically spawns remote-enabled [Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) sessions to work on them.
+
+Instead of waiting for a developer to open a terminal and manually engage Copilot, copilotd continuously monitors your repositories. When an issue matches your rules—by label, assignee, milestone, or type, it automatically dispatches a Copilot CLI agent, creates an isolated worktree, asks clarifying questions via issue comments, writes code, opens a PR, and even responds to PR review feedback. All without human intervention.
+
+copilotd sits between GitHub Issues and the Copilot CLI running on your dev machine, acting as an always-on orchestration layer.
+
+Available for Windows, macOS, and Linux.
 
 ## Features
 
