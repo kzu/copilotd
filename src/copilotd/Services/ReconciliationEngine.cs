@@ -46,6 +46,11 @@ public sealed class ReconciliationEngine
     {
         _logger.LogInformation("Starting reconciliation cycle");
 
+        var hadMachineIdentifier = _stateStore.GetMachineIdentifier() is not null;
+        var machineIdentifier = _stateStore.EnsureMachineIdentifier();
+        if (!hadMachineIdentifier)
+            _logger.LogInformation("Assigned machine identifier {MachineIdentifier}", machineIdentifier);
+
         // Step 0: Prune terminal sessions older than 7 days
         PruneTerminalSessions(state);
 

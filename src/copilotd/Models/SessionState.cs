@@ -232,8 +232,17 @@ public enum ControlSessionStatus
 /// </summary>
 public sealed class ControlSessionInfo
 {
-    /// <summary>Generated UUID for the copilot remote session.</summary>
+    /// <summary>
+    /// Copilot session ID when known. For named control sessions, copilotd may initially
+    /// resolve the live remote session via <see cref="CopilotSessionName"/> instead.
+    /// </summary>
     public string CopilotSessionId { get; set; } = "";
+
+    /// <summary>
+    /// Human-readable control session name shown in the remote sessions UI.
+    /// Includes the copilotd machine identifier, but never the real machine name.
+    /// </summary>
+    public string? CopilotSessionName { get; set; }
 
     /// <summary>OS process ID of the copilot process.</summary>
     public int? ProcessId { get; set; }

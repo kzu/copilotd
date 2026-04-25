@@ -107,7 +107,7 @@ Installed copilotd binaries can self-update in the background: the daemon checks
 | `copilotd run` | Start the polling daemon and print the current daemon log folder |
 | `copilotd start` | Start the daemon in the background and print the current daemon log folder |
 | `copilotd stop` | Stop the daemon and print the current daemon log folder |
-| `copilotd status` | Show daemon health, watched repos, the active daemon log folder, and the session list |
+| `copilotd status` | Show daemon health, machine identity, watched repos, the active daemon log folder, and the session list |
 | `copilotd logs` | Print the copilotd logs directory (`copilotd log` also works) |
 | `copilotd logs clear [--days <n>]` | Clear log files, optionally only those older than the supplied age |
 | `copilotd session` | List dispatched sessions with their remote session URLs (`copilotd sessions` also works; default alias for `session list`) |
@@ -191,6 +191,7 @@ The built-in prompt and `session_name_format` support token replacement:
 | `$(repo)` | Repository name only |
 | `$(issue_id)` | Issue number |
 | `$(session_id)` | Copilot session ID used with `--resume` |
+| `$(machine_id)` / `$(machine_identifier)` | Assigned copilotd machine identifier |
 | `$(machine_name)` | Local machine name |
 | `$(gh_user)` | Authenticated GitHub username from copilotd config |
 
@@ -353,6 +354,7 @@ sessions, and more — all via natural language.
 - If the control session process dies, the daemon automatically relaunches it on the next poll cycle
 - It does not count against the `max_instances` limit
 - It is tracked separately from dispatch sessions and shown in the `copilotd status` output, including its GitHub remote session URL
+- Its remote session name includes the copilotd machine identifier so multiple daemon instances are easy to distinguish remotely
 
 **Available commands in the control session:**
 
@@ -387,6 +389,7 @@ When running from a source checkout via `copilotd.sh`, `copilotd.ps1`, or `copil
 - `prompt.md` — optional global custom prompt text appended to the built-in prompt
 - `logs\` — rolling file logs for copilotd commands, with daemon instances isolated under `logs\daemon_<uuid>\`
 - `.lock` — single-instance guard (present while daemon is running)
+- `<local app data>\copilotd\machine.id` — stable machine identifier stored outside `COPILOTD_HOME` so it survives state resets
 
 ### Config options
 
