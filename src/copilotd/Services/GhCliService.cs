@@ -6,6 +6,18 @@ using Microsoft.Extensions.Logging;
 
 namespace Copilotd.Services;
 
+public enum GitHubRepoAccessKind
+{
+    Owned,
+    WriteAccess,
+}
+
+public sealed class AccessibleGitHubRepo
+{
+    public string NameWithOwner { get; init; } = "";
+    public GitHubRepoAccessKind AccessKind { get; init; }
+}
+
 /// <summary>
 /// Adapter for the GitHub CLI (gh). Handles dependency checks, auth, repo listing, and issue queries.
 /// </summary>
@@ -98,19 +110,190 @@ public sealed class GhCliService
     }
 
     /// <summary>
-    /// Lists repositories the user has access to.
+    /// Lists repositories the user owns.
     /// </summary>
-    public List<string> ListRepos(int limit = 200)
+    public List<AccessibleGitHubRepo> ListOwnedRepos(int limit = 200)
+        => ListOwnedReposFallback(limit);
+
+    /// <summary>
+    /// Lists repositories the user can watch during init:
+    /// repos they own plus repos where they have write-or-better access.
+    /// This can be expensive for users who belong to large organizations because
+    /// GitHub's API does not support server-side filtering by write permission.
+    /// </summary>
+    public List<AccessibleGitHubRepo> ListAccessibleRepos(string? currentUsername = null)
+    {
+        var repos = new Dictionary<string, AccessibleGitHubRepo>(StringComparer.OrdinalIgnoreCase);
+        currentUsername ??= CheckAuth().Username;
+
+        var (exitCode, output) = RunGh(
+            "api --paginate --slurp \"user/repos?per_page=100&affiliation=owner,collaborator,organization_member\"");
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to list accessible repos via REST API: {Output}", output);
+            return ListOwnedReposFallback();
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            foreach (var page in doc.RootElement.EnumerateArray())
+            {
+                foreach (var repo in page.EnumerateArray())
+                {
+                    var fullName = repo.TryGetProperty("full_name", out var fullNameEl)
+                        ? fullNameEl.GetString()
+                        : null;
+
+                    if (string.IsNullOrWhiteSpace(fullName))
+                        continue;
+
+                    var ownerLogin = repo.TryGetProperty("owner", out var ownerEl)
+                        && ownerEl.TryGetProperty("login", out var ownerLoginEl)
+                        ? ownerLoginEl.GetString()
+                        : null;
+
+                    if (string.IsNullOrWhiteSpace(ownerLogin))
+                        continue;
+
+                    var isOwnedByViewer = !string.IsNullOrWhiteSpace(currentUsername)
+                        && string.Equals(ownerLogin, currentUsername, StringComparison.OrdinalIgnoreCase);
+
+                    if (!isOwnedByViewer && !HasWriteOrBetter(repo))
+                        continue;
+
+                    repos[fullName] = new AccessibleGitHubRepo
+                    {
+                        NameWithOwner = fullName,
+                        AccessKind = isOwnedByViewer ? GitHubRepoAccessKind.Owned : GitHubRepoAccessKind.WriteAccess,
+                    };
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse accessible repo REST response");
+            return ListOwnedReposFallback();
+        }
+
+        return repos.Values
+            .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Searches for repositories the current user can access and returns only owned
+    /// or write-access matches. Intended for narrowing the expensive write-access
+    /// not-cloned picker during init.
+    /// </summary>
+    public List<AccessibleGitHubRepo> SearchAccessibleRepos(string searchTerm, string? currentUsername = null, int limit = 50)
+    {
+        currentUsername ??= CheckAuth().Username;
+        var query = BuildRepositorySearchQuery(searchTerm);
+        var request = new JsonObject
+        {
+            ["query"] = """
+                query($query: String!, $limit: Int!) {
+                    search(type: REPOSITORY, query: $query, first: $limit) {
+                        nodes {
+                            ... on Repository {
+                                nameWithOwner
+                                viewerPermission
+                                owner {
+                                    login
+                                }
+                            }
+                        }
+                    }
+                }
+                """,
+            ["variables"] = new JsonObject
+            {
+                ["query"] = query,
+                ["limit"] = limit,
+            },
+        };
+
+        var (exitCode, output) = RunGhWithStdin("api graphql --input -", request.ToJsonString());
+        if (exitCode != 0)
+        {
+            _logger.LogWarning("Failed to search accessible repos for '{SearchTerm}': {Output}", searchTerm, output);
+            return [];
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(output);
+            if (doc.RootElement.TryGetProperty("errors", out var errors))
+            {
+                _logger.LogWarning("GraphQL errors searching repos for '{SearchTerm}': {Errors}", searchTerm, errors.ToString());
+                return [];
+            }
+
+            if (!doc.RootElement.TryGetProperty("data", out var data)
+                || !data.TryGetProperty("search", out var search)
+                || !search.TryGetProperty("nodes", out var nodes))
+            {
+                return [];
+            }
+
+            var repos = new Dictionary<string, AccessibleGitHubRepo>(StringComparer.OrdinalIgnoreCase);
+            foreach (var node in nodes.EnumerateArray())
+            {
+                var nameWithOwner = node.TryGetProperty("nameWithOwner", out var nameEl)
+                    ? nameEl.GetString()
+                    : null;
+                var ownerLogin = node.TryGetProperty("owner", out var ownerEl)
+                    && ownerEl.TryGetProperty("login", out var ownerLoginEl)
+                    ? ownerLoginEl.GetString()
+                    : null;
+                var viewerPermission = node.TryGetProperty("viewerPermission", out var permissionEl)
+                    ? permissionEl.GetString()
+                    : null;
+
+                if (string.IsNullOrWhiteSpace(nameWithOwner) || string.IsNullOrWhiteSpace(ownerLogin))
+                    continue;
+
+                var isOwnedByViewer = !string.IsNullOrWhiteSpace(currentUsername)
+                    && string.Equals(ownerLogin, currentUsername, StringComparison.OrdinalIgnoreCase);
+
+                if (!isOwnedByViewer && !HasWriteOrBetter(viewerPermission))
+                    continue;
+
+                repos[nameWithOwner] = new AccessibleGitHubRepo
+                {
+                    NameWithOwner = nameWithOwner,
+                    AccessKind = isOwnedByViewer ? GitHubRepoAccessKind.Owned : GitHubRepoAccessKind.WriteAccess,
+                };
+            }
+
+            return repos.Values
+                .OrderBy(repo => repo.NameWithOwner, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse accessible repo search response for '{SearchTerm}'", searchTerm);
+            return [];
+        }
+    }
+
+    private List<AccessibleGitHubRepo> ListOwnedReposFallback(int limit = 200)
     {
         var (exitCode, output) = RunGh($"repo list --limit {limit} --json nameWithOwner --jq \".[].nameWithOwner\"");
         if (exitCode != 0)
         {
-            _logger.LogWarning("Failed to list repos: {Output}", output);
+            _logger.LogWarning("Failed to list fallback owned repos: {Output}", output);
             return [];
         }
 
         return output
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(nameWithOwner => new AccessibleGitHubRepo
+            {
+                NameWithOwner = nameWithOwner,
+                AccessKind = GitHubRepoAccessKind.Owned,
+            })
             .ToList();
     }
 
@@ -630,6 +813,39 @@ public sealed class GhCliService
     }
 
     private static readonly TimeSpan GhTimeout = TimeSpan.FromSeconds(30);
+
+    private static bool HasWriteOrBetter(JsonElement repo)
+    {
+        if (!repo.TryGetProperty("permissions", out var permissions) || permissions.ValueKind != JsonValueKind.Object)
+            return false;
+
+        return GetBooleanProperty(permissions, "admin")
+            || GetBooleanProperty(permissions, "maintain")
+            || GetBooleanProperty(permissions, "push");
+    }
+
+    private static bool GetBooleanProperty(JsonElement obj, string propertyName)
+        => obj.TryGetProperty(propertyName, out var property)
+            && property.ValueKind is JsonValueKind.True or JsonValueKind.False
+            && property.GetBoolean();
+
+    private static bool HasWriteOrBetter(string? viewerPermission)
+        => viewerPermission is "ADMIN" or "MAINTAIN" or "WRITE";
+
+    private static string BuildRepositorySearchQuery(string searchTerm)
+    {
+        var trimmed = searchTerm.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+            return "";
+
+        if (trimmed.Contains(':', StringComparison.Ordinal))
+            return trimmed;
+
+        if (trimmed.Contains('/', StringComparison.Ordinal) && !trimmed.Contains(' ', StringComparison.Ordinal))
+            return $"repo:{trimmed}";
+
+        return $"{trimmed} in:name";
+    }
 
     private (int ExitCode, string Output) RunGh(string arguments)
     {
