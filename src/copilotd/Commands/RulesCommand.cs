@@ -135,6 +135,9 @@ public static class RulesCommand
         if (rule.Model is not null)
             parts.Add($"--model={rule.Model}");
 
+        if (rule.Autopilot) parts.Add("--autopilot");
+        if (rule.Plan) parts.Add("--plan");
+
         return parts.Count > 0 ? string.Join(", ", parts) : "(defaults)";
     }
 
@@ -161,6 +164,8 @@ public static class RulesCommand
         var yoloOption = new Option<bool>("--yolo") { Description = "Pass --yolo to copilot (implies --allow-all-tools and --allow-all-urls)" };
         var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Pass --allow-all-tools to copilot (default: true)" };
         var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Pass --allow-all-urls to copilot (default: false)" };
+        var autopilotOption = new Option<bool>("--autopilot") { Description = "Pass --autopilot to copilot (fully autonomous mode)" };
+        var planOption = new Option<bool>("--plan") { Description = "Pass --plan to copilot (plan-only mode)" };
         var promptOption = new Option<string?>("--prompt") { Description = "Extra prompt for this rule" };
         var modelOption = new Option<string?>("--model") { Description = "Model to use for sessions triggered by this rule (overrides global default_model)" };
         var customPromptOption = new Option<string?>("--custom-prompt") { Description = "Per-rule custom prompt (appended to or overrides global custom prompt)" };
@@ -178,6 +183,8 @@ public static class RulesCommand
         command.Options.Add(yoloOption);
         command.Options.Add(allowAllToolsOption);
         command.Options.Add(allowAllUrlsOption);
+        command.Options.Add(autopilotOption);
+        command.Options.Add(planOption);
         command.Options.Add(promptOption);
         command.Options.Add(modelOption);
         command.Options.Add(customPromptOption);
@@ -216,6 +223,8 @@ public static class RulesCommand
                     Yolo = parseResult.GetValue(yoloOption),
                     AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true,
                     AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false,
+                    Autopilot = parseResult.GetValue(autopilotOption),
+                    Plan = parseResult.GetValue(planOption),
                     Model = string.IsNullOrWhiteSpace(parseResult.GetValue(modelOption)) ? null : parseResult.GetValue(modelOption),
                     ExtraPrompt = parseResult.GetValue(promptOption),
                     CustomPrompt = parseResult.GetValue(customPromptOption),
@@ -275,6 +284,8 @@ public static class RulesCommand
         var yoloOption = new Option<bool?>("--yolo") { Description = "Update yolo setting" };
         var allowAllToolsOption = new Option<bool?>("--allow-all-tools") { Description = "Update allow-all-tools setting" };
         var allowAllUrlsOption = new Option<bool?>("--allow-all-urls") { Description = "Update allow-all-urls setting" };
+        var autopilotOption = new Option<bool?>("--autopilot") { Description = "Update autopilot setting" };
+        var planOption = new Option<bool?>("--plan") { Description = "Update plan setting" };
         var promptOption = new Option<string?>("--prompt") { Description = "Update extra prompt" };
         var modelOption = new Option<string?>("--model") { Description = "Update model (overrides global default_model)" };
         var customPromptOption = new Option<string?>("--custom-prompt") { Description = "Update per-rule custom prompt" };
@@ -295,6 +306,8 @@ public static class RulesCommand
         command.Options.Add(yoloOption);
         command.Options.Add(allowAllToolsOption);
         command.Options.Add(allowAllUrlsOption);
+        command.Options.Add(autopilotOption);
+        command.Options.Add(planOption);
         command.Options.Add(promptOption);
         command.Options.Add(modelOption);
         command.Options.Add(customPromptOption);
@@ -353,6 +366,12 @@ public static class RulesCommand
 
                 if (parseResult.GetResult(allowAllUrlsOption) is not null)
                     rule.AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false;
+
+                if (parseResult.GetResult(autopilotOption) is not null)
+                    rule.Autopilot = parseResult.GetValue(autopilotOption) ?? false;
+
+                if (parseResult.GetResult(planOption) is not null)
+                    rule.Plan = parseResult.GetValue(planOption) ?? false;
 
                 if (parseResult.GetResult(promptOption) is not null)
                     rule.ExtraPrompt = parseResult.GetValue(promptOption);
