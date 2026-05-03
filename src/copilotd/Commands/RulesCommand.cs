@@ -75,74 +75,156 @@ public static class RulesCommand
 
     private static int RenderRulesList(CopilotdConfig config, string? repoFilter, string? assigneeFilter, bool assigneeFlagPresent)
     {
-        var rules = config.Rules.AsEnumerable();
+        var issueRuleCount = config.IssueRules.Count;
+        var pullRequestRuleCount = config.PullRequestRules.Count;
+        var issueRules = config.IssueRules.AsEnumerable();
+        var pullRequestRules = config.PullRequestRules.AsEnumerable();
 
         if (repoFilter is not null)
-            rules = rules.Where(r => r.Value.Repos.Contains(repoFilter, StringComparer.OrdinalIgnoreCase));
+        {
+            issueRules = issueRules.Where(r => r.Value.Repos.Contains(repoFilter, StringComparer.OrdinalIgnoreCase));
+            pullRequestRules = pullRequestRules.Where(r => r.Value.Repos.Contains(repoFilter, StringComparer.OrdinalIgnoreCase));
+        }
 
         if (assigneeFlagPresent)
         {
             if (assigneeFilter is not null)
-                rules = rules.Where(r => string.Equals(r.Value.User, assigneeFilter, StringComparison.OrdinalIgnoreCase));
+            {
+                issueRules = issueRules.Where(r => string.Equals(r.Value.Assignee, assigneeFilter, StringComparison.OrdinalIgnoreCase));
+                pullRequestRules = pullRequestRules.Where(r => string.Equals(r.Value.Assignee, assigneeFilter, StringComparison.OrdinalIgnoreCase));
+            }
             else
-                rules = rules.Where(r => r.Value.User is not null);
+            {
+                issueRules = issueRules.Where(r => r.Value.Assignee is not null);
+                pullRequestRules = pullRequestRules.Where(r => r.Value.Assignee is not null);
+            }
         }
 
-        var table = new Table();
-        table.ShowRowSeparators = true;
-        table.AddColumn(new TableColumn("[bold]Name[/]"));
-        table.AddColumn(new TableColumn("[bold]Assignee[/]"));
-        table.AddColumn(new TableColumn("[bold]Authors[/]"));
-        table.AddColumn(new TableColumn("[bold]Labels[/]"));
-        table.AddColumn(new TableColumn("[bold]Milestone[/]"));
-        table.AddColumn(new TableColumn("[bold]Type[/]"));
-        table.AddColumn(new TableColumn("[bold]Repos[/]"));
-        table.AddColumn(new TableColumn("[bold]Launch Options[/]"));
+        var issueRuleList = issueRules.ToList();
+        var pullRequestRuleList = pullRequestRules.ToList();
 
-        foreach (var kvp in rules)
+        AnsiConsole.MarkupLine("[bold]Issue dispatch rules[/]");
+        if (issueRuleList.Count == 0)
         {
-            var name = kvp.Key;
-            var rule = kvp.Value;
-            table.AddRow(
-                Markup.Escape(name),
-                Markup.Escape(rule.User ?? "*"),
-                Markup.Escape(FormatAuthorMode(rule)),
-                Markup.Escape(string.Join(", ", rule.Labels)),
-                Markup.Escape(rule.Milestone ?? "*"),
-                Markup.Escape(rule.Type ?? "*"),
-                Markup.Escape(string.Join(", ", rule.Repos)),
-                Markup.Escape(FormatLaunchOptions(rule)));
+            RenderNoRulesMessage("issue", issueRuleCount == 0, "copilotd rules add <name> --kind issue");
+        }
+        else
+        {
+            var table = new Table();
+            table.ShowRowSeparators = true;
+            table.AddColumn(new TableColumn("[bold]Name[/]"));
+            table.AddColumn(new TableColumn("[bold]Assignee[/]"));
+            table.AddColumn(new TableColumn("[bold]Authors[/]"));
+            table.AddColumn(new TableColumn("[bold]Labels[/]"));
+            table.AddColumn(new TableColumn("[bold]Milestone[/]"));
+            table.AddColumn(new TableColumn("[bold]Type[/]"));
+            table.AddColumn(new TableColumn("[bold]Repos[/]"));
+            table.AddColumn(new TableColumn("[bold]Launch Options[/]"));
+
+            foreach (var kvp in issueRuleList)
+            {
+                var name = kvp.Key;
+                var issueRule = kvp.Value;
+                table.AddRow(
+                    Markup.Escape(name),
+                    Markup.Escape(issueRule.Assignee ?? "*"),
+                    Markup.Escape(FormatAuthorMode(issueRule)),
+                    Markup.Escape(string.Join(", ", issueRule.Labels)),
+                    Markup.Escape(issueRule.Milestone ?? "*"),
+                    Markup.Escape(issueRule.Type ?? "*"),
+                    Markup.Escape(string.Join(", ", issueRule.Repos)),
+                    Markup.Escape(FormatLaunchOptions(issueRule)));
+            }
+
+            AnsiConsole.Write(table);
         }
 
-        AnsiConsole.Write(table);
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[bold]Pull request dispatch rules[/]");
+        if (pullRequestRuleList.Count == 0)
+        {
+            RenderNoRulesMessage("pull request", pullRequestRuleCount == 0, "copilotd rules add <name> --kind pr");
+        }
+        else
+        {
+            var prTable = new Table();
+            prTable.ShowRowSeparators = true;
+            prTable.AddColumn(new TableColumn("[bold]Name[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Assignee[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Authors[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Labels[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Base[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Draft[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Review[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Branch[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Repos[/]"));
+            prTable.AddColumn(new TableColumn("[bold]Launch Options[/]"));
+
+            foreach (var kvp in pullRequestRuleList)
+            {
+                var name = kvp.Key;
+                var pullRequestRule = kvp.Value;
+                prTable.AddRow(
+                    Markup.Escape(name),
+                    Markup.Escape(pullRequestRule.Assignee ?? "*"),
+                    Markup.Escape(FormatAuthorMode(pullRequestRule)),
+                    Markup.Escape(string.Join(", ", pullRequestRule.Labels)),
+                    Markup.Escape(pullRequestRule.BaseBranch ?? "*"),
+                    Markup.Escape(pullRequestRule.Draft?.ToString() ?? "*"),
+                    Markup.Escape(pullRequestRule.ReviewDecision ?? "*"),
+                    Markup.Escape(pullRequestRule.BranchStrategy.ToString()),
+                    Markup.Escape(string.Join(", ", pullRequestRule.Repos)),
+                    Markup.Escape(FormatLaunchOptions(pullRequestRule)));
+            }
+
+            AnsiConsole.Write(prTable);
+        }
         return 0;
     }
 
-    private static string FormatLaunchOptions(DispatchRule rule)
+    private static void RenderNoRulesMessage(string dispatchType, bool noneDefined, string addCommand)
+    {
+        var reason = noneDefined
+            ? $"No {dispatchType} dispatch rules are currently defined."
+            : $"No {dispatchType} dispatch rules match the current filters.";
+        AnsiConsole.MarkupLine($"[grey]{Markup.Escape(reason)} Run [blue]{Markup.Escape(addCommand)}[/] to define one.[/]");
+    }
+
+    private static string FormatLaunchOptions(DispatchRuleOptions dispatchRule)
     {
         var parts = new List<string>();
 
-        if (rule.Yolo)
+        if (dispatchRule.Yolo)
         {
             parts.Add("--yolo");
         }
         else
         {
-            if (rule.AllowAllTools) parts.Add("--allow-all-tools");
-            if (rule.AllowAllUrls) parts.Add("--allow-all-urls");
+            if (dispatchRule.AllowAllTools) parts.Add("--allow-all-tools");
+            if (dispatchRule.AllowAllUrls) parts.Add("--allow-all-urls");
         }
 
-        if (rule.Model is not null)
-            parts.Add($"--model={rule.Model}");
+        if (dispatchRule.Model is not null)
+            parts.Add($"--model={dispatchRule.Model}");
 
         return parts.Count > 0 ? string.Join(", ", parts) : "(defaults)";
     }
 
-    private static string FormatAuthorMode(DispatchRule rule)
+    private static string FormatAuthorMode(IssueDispatchRule issueRule)
     {
-        return rule.AuthorMode switch
+        return issueRule.AuthorMode switch
         {
-            AuthorMode.Allowed => string.Join(", ", rule.Authors),
+            AuthorMode.Allowed => string.Join(", ", issueRule.Authors),
+            AuthorMode.WriteAccess => "(write access)",
+            _ => "*",
+        };
+    }
+
+    private static string FormatAuthorMode(PullRequestDispatchRule pullRequestRule)
+    {
+        return pullRequestRule.AuthorMode switch
+        {
+            AuthorMode.Allowed => string.Join(", ", pullRequestRule.Authors),
             AuthorMode.WriteAccess => "(write access)",
             _ => "*",
         };
@@ -154,6 +236,7 @@ public static class RulesCommand
         command.Aliases.Add("new");
         command.Aliases.Add("create");
         var nameArg = new Argument<string>("name");
+        var kindOption = new Option<string>("--kind") { Description = "Rule kind: issue (default) or pr" };
         var assigneeOption = new Option<string?>("--assignee") { Description = "Assignee condition" };
         var labelOption = new Option<string[]>("--label") { Description = "Label condition (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
         var milestoneOption = new Option<string?>("--milestone") { Description = "Milestone condition" };
@@ -169,8 +252,15 @@ public static class RulesCommand
         var addAuthorOption = new Option<string[]>("--add-author") { Description = "Add an allowed issue author (can be specified multiple times)", AllowMultipleArgumentsPerToken = true };
         var writeOnlyAuthorsOption = new Option<bool>("--write-only-authors") { Description = "Only dispatch issues from authors with write access to the repo" };
         var anyAuthorOption = new Option<bool>("--any-author") { Description = "Allow issues from any author (default)" };
+        var baseOption = new Option<string?>("--base") { Description = "PR base branch condition (PR rules only)" };
+        var headOption = new Option<string?>("--head") { Description = "PR head branch condition (PR rules only)" };
+        var headRepoOption = new Option<string?>("--head-repo") { Description = "PR head repo condition (PR rules only)" };
+        var draftOption = new Option<bool?>("--draft") { Description = "PR draft-state condition (PR rules only)" };
+        var reviewDecisionOption = new Option<string?>("--review-decision") { Description = "PR review decision condition (PR rules only)" };
+        var branchStrategyOption = new Option<string?>("--branch-strategy") { Description = "PR branch strategy: source-branch, child-branch, or read-only" };
 
         command.Arguments.Add(nameArg);
+        command.Options.Add(kindOption);
         command.Options.Add(assigneeOption);
         command.Options.Add(labelOption);
         command.Options.Add(milestoneOption);
@@ -186,6 +276,12 @@ public static class RulesCommand
         command.Options.Add(addAuthorOption);
         command.Options.Add(writeOnlyAuthorsOption);
         command.Options.Add(anyAuthorOption);
+        command.Options.Add(baseOption);
+        command.Options.Add(headOption);
+        command.Options.Add(headRepoOption);
+        command.Options.Add(draftOption);
+        command.Options.Add(reviewDecisionOption);
+        command.Options.Add(branchStrategyOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -201,15 +297,90 @@ public static class RulesCommand
 
                 var name = parseResult.GetValue(nameArg)!;
 
-                if (config.Rules.ContainsKey(name))
+                if (config.IssueRules.ContainsKey(name) || config.PullRequestRules.ContainsKey(name))
                 {
                     ConsoleOutput.Error($"Rule '{name}' already exists. Use 'rules update' to modify it.");
                     return 1;
                 }
 
-                var rule = new DispatchRule
+                var kind = parseResult.GetValue(kindOption);
+                var isPrRule = string.Equals(kind, "pr", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(kind, "pull-request", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(kind, "pullrequest", StringComparison.OrdinalIgnoreCase);
+
+                if (!isPrRule && !string.IsNullOrWhiteSpace(kind) && !string.Equals(kind, "issue", StringComparison.OrdinalIgnoreCase))
                 {
-                    User = parseResult.GetValue(assigneeOption),
+                    ConsoleOutput.Error("Invalid --kind. Use 'issue' or 'pr'.");
+                    return 1;
+                }
+
+                if (isPrRule)
+                {
+                    if (parseResult.GetResult(milestoneOption) is not null || parseResult.GetResult(typeOption) is not null)
+                    {
+                        ConsoleOutput.Error("--milestone and --type apply only to issue rules.");
+                        return 1;
+                    }
+
+                    var branchStrategyValue = parseResult.GetValue(branchStrategyOption);
+                    if (!TryParseBranchStrategy(branchStrategyValue, out var branchStrategy))
+                    {
+                        ConsoleOutput.Error("Invalid --branch-strategy. Use 'source-branch', 'child-branch', or 'read-only'.");
+                        return 1;
+                    }
+
+                    var pullRequestRule = new PullRequestDispatchRule
+                    {
+                        Assignee = parseResult.GetValue(assigneeOption),
+                        Labels = [.. parseResult.GetValue(labelOption) ?? []],
+                        BaseBranch = parseResult.GetValue(baseOption),
+                        HeadBranch = parseResult.GetValue(headOption),
+                        HeadRepo = parseResult.GetValue(headRepoOption),
+                        Draft = parseResult.GetValue(draftOption),
+                        ReviewDecision = parseResult.GetValue(reviewDecisionOption),
+                        BranchStrategy = branchStrategy,
+                        Yolo = parseResult.GetValue(yoloOption),
+                        AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true,
+                        AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false,
+                        Model = string.IsNullOrWhiteSpace(parseResult.GetValue(modelOption)) ? null : parseResult.GetValue(modelOption),
+                        ExtraPrompt = parseResult.GetValue(promptOption),
+                        CustomPrompt = parseResult.GetValue(customPromptOption),
+                        Repos = [.. parseResult.GetValue(repoOption) ?? []],
+                        Authors = [.. parseResult.GetValue(addAuthorOption) ?? []],
+                    };
+
+                    if (parseResult.GetValue(writeOnlyAuthorsOption))
+                        pullRequestRule.AuthorMode = AuthorMode.WriteAccess;
+                    else if (pullRequestRule.Authors.Count > 0)
+                        pullRequestRule.AuthorMode = AuthorMode.Allowed;
+
+                    var prModeValue = parseResult.GetValue(customPromptModeOption);
+                    if (prModeValue is not null)
+                    {
+                        if (!TryParsePromptMode(prModeValue, out var prMode))
+                        {
+                            ConsoleOutput.Error("Invalid --custom-prompt-mode. Use 'append' or 'override'.");
+                            return 1;
+                        }
+                        pullRequestRule.CustomPromptMode = prMode;
+                    }
+
+                    config.PullRequestRules[name] = pullRequestRule;
+                    CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
+                        copilotTrust,
+                        repoResolver,
+                        copilotCli,
+                        config,
+                        state,
+                        pullRequestRule.Repos);
+                    stateStore.SaveConfig(config);
+                    ConsoleOutput.Success($"Pull request rule '{name}' added.");
+                    return 0;
+                }
+
+                var issueRule = new IssueDispatchRule
+                {
+                    Assignee = parseResult.GetValue(assigneeOption),
                     Labels = [.. parseResult.GetValue(labelOption) ?? []],
                     Milestone = parseResult.GetValue(milestoneOption),
                     Type = parseResult.GetValue(typeOption),
@@ -226,11 +397,11 @@ public static class RulesCommand
                 // Author mode: --write-only-authors wins over --add-author, --any-author is default
                 if (parseResult.GetValue(writeOnlyAuthorsOption))
                 {
-                    rule.AuthorMode = AuthorMode.WriteAccess;
+                    issueRule.AuthorMode = AuthorMode.WriteAccess;
                 }
-                else if (rule.Authors.Count > 0)
+                else if (issueRule.Authors.Count > 0)
                 {
-                    rule.AuthorMode = AuthorMode.Allowed;
+                    issueRule.AuthorMode = AuthorMode.Allowed;
                 }
                 // else: AuthorMode.Any (default)
 
@@ -242,17 +413,17 @@ public static class RulesCommand
                         ConsoleOutput.Error("Invalid --custom-prompt-mode. Use 'append' or 'override'.");
                         return 1;
                     }
-                    rule.CustomPromptMode = mode;
+                    issueRule.CustomPromptMode = mode;
                 }
 
-                config.Rules[name] = rule;
+                config.IssueRules[name] = issueRule;
                 CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
                     copilotTrust,
                     repoResolver,
                     copilotCli,
                     config,
                     state,
-                    rule.Repos);
+                    issueRule.Repos);
                 stateStore.SaveConfig(config);
                 ConsoleOutput.Success($"Rule '{name}' added.");
                 return 0;
@@ -285,6 +456,12 @@ public static class RulesCommand
         var deleteAuthorOption = new Option<string[]>("--delete-author") { Description = "Remove an allowed issue author", AllowMultipleArgumentsPerToken = true };
         var writeOnlyAuthorsOption = new Option<bool>("--write-only-authors") { Description = "Only dispatch issues from authors with write access to the repo" };
         var anyAuthorOption = new Option<bool>("--any-author") { Description = "Allow issues from any author (clears author list)" };
+        var baseOption = new Option<string?>("--base") { Description = "Update PR base branch condition (PR rules only)" };
+        var headOption = new Option<string?>("--head") { Description = "Update PR head branch condition (PR rules only)" };
+        var headRepoOption = new Option<string?>("--head-repo") { Description = "Update PR head repo condition (PR rules only)" };
+        var draftOption = new Option<bool?>("--draft") { Description = "Update PR draft-state condition (PR rules only)" };
+        var reviewDecisionOption = new Option<string?>("--review-decision") { Description = "Update PR review decision condition (PR rules only)" };
+        var branchStrategyOption = new Option<string?>("--branch-strategy") { Description = "Update PR branch strategy: source-branch, child-branch, or read-only" };
 
         command.Arguments.Add(nameArg);
         command.Options.Add(assigneeOption);
@@ -305,6 +482,12 @@ public static class RulesCommand
         command.Options.Add(deleteAuthorOption);
         command.Options.Add(writeOnlyAuthorsOption);
         command.Options.Add(anyAuthorOption);
+        command.Options.Add(baseOption);
+        command.Options.Add(headOption);
+        command.Options.Add(headRepoOption);
+        command.Options.Add(draftOption);
+        command.Options.Add(reviewDecisionOption);
+        command.Options.Add(branchStrategyOption);
 
         command.SetAction(async (ParseResult parseResult, CancellationToken ct) =>
         {
@@ -320,51 +503,181 @@ public static class RulesCommand
 
                 var name = parseResult.GetValue(nameArg)!;
 
-                if (!config.Rules.TryGetValue(name, out var rule))
+                if (!config.IssueRules.TryGetValue(name, out var issueRule))
                 {
-                    ConsoleOutput.Error($"Rule '{name}' not found.");
-                    return 1;
+                    if (!config.PullRequestRules.TryGetValue(name, out var pullRequestRule))
+                    {
+                        ConsoleOutput.Error($"Rule '{name}' not found.");
+                        return 1;
+                    }
+
+                    if (parseResult.GetResult(milestoneOption) is not null || parseResult.GetResult(typeOption) is not null)
+                    {
+                        ConsoleOutput.Error("--milestone and --type apply only to issue rules.");
+                        return 1;
+                    }
+
+                    if (parseResult.GetResult(assigneeOption) is not null)
+                        pullRequestRule.Assignee = parseResult.GetValue(assigneeOption);
+
+                    var prAddLabels = parseResult.GetValue(addLabelOption) ?? [];
+                    var prDeleteLabels = parseResult.GetValue(deleteLabelOption) ?? [];
+                    foreach (var label in prDeleteLabels)
+                        pullRequestRule.Labels.Remove(label);
+                    foreach (var label in prAddLabels)
+                    {
+                        if (!pullRequestRule.Labels.Contains(label, StringComparer.OrdinalIgnoreCase))
+                            pullRequestRule.Labels.Add(label);
+                    }
+
+                    if (parseResult.GetResult(baseOption) is not null)
+                        pullRequestRule.BaseBranch = parseResult.GetValue(baseOption);
+
+                    if (parseResult.GetResult(headOption) is not null)
+                        pullRequestRule.HeadBranch = parseResult.GetValue(headOption);
+
+                    if (parseResult.GetResult(headRepoOption) is not null)
+                        pullRequestRule.HeadRepo = parseResult.GetValue(headRepoOption);
+
+                    if (parseResult.GetResult(draftOption) is not null)
+                        pullRequestRule.Draft = parseResult.GetValue(draftOption);
+
+                    if (parseResult.GetResult(reviewDecisionOption) is not null)
+                        pullRequestRule.ReviewDecision = parseResult.GetValue(reviewDecisionOption);
+
+                    if (parseResult.GetResult(branchStrategyOption) is not null)
+                    {
+                        if (!TryParseBranchStrategy(parseResult.GetValue(branchStrategyOption), out var branchStrategy))
+                        {
+                            ConsoleOutput.Error("Invalid --branch-strategy. Use 'source-branch', 'child-branch', or 'read-only'.");
+                            return 1;
+                        }
+                        pullRequestRule.BranchStrategy = branchStrategy;
+                    }
+
+                    if (parseResult.GetResult(yoloOption) is not null)
+                        pullRequestRule.Yolo = parseResult.GetValue(yoloOption) ?? false;
+
+                    if (parseResult.GetResult(allowAllToolsOption) is not null)
+                        pullRequestRule.AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true;
+
+                    if (parseResult.GetResult(allowAllUrlsOption) is not null)
+                        pullRequestRule.AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false;
+
+                    if (parseResult.GetResult(promptOption) is not null)
+                        pullRequestRule.ExtraPrompt = parseResult.GetValue(promptOption);
+
+                    if (parseResult.GetResult(modelOption) is not null)
+                    {
+                        var modelValue = parseResult.GetValue(modelOption);
+                        pullRequestRule.Model = string.IsNullOrWhiteSpace(modelValue) ? null : modelValue;
+                    }
+
+                    if (parseResult.GetResult(customPromptOption) is not null)
+                        pullRequestRule.CustomPrompt = parseResult.GetValue(customPromptOption);
+
+                    if (parseResult.GetResult(customPromptModeOption) is not null)
+                    {
+                        var modeValue = parseResult.GetValue(customPromptModeOption);
+                        if (!TryParsePromptMode(modeValue, out var mode))
+                        {
+                            ConsoleOutput.Error("Invalid --custom-prompt-mode. Use 'append' or 'override'.");
+                            return 1;
+                        }
+                        pullRequestRule.CustomPromptMode = mode;
+                    }
+
+                    var prAddRepos = parseResult.GetValue(addRepoOption) ?? [];
+                    var prDeleteRepos = parseResult.GetValue(deleteRepoOption) ?? [];
+                    foreach (var repo in prDeleteRepos)
+                        pullRequestRule.Repos.RemoveAll(r => string.Equals(r, repo, StringComparison.OrdinalIgnoreCase));
+                    foreach (var repo in prAddRepos)
+                    {
+                        if (!pullRequestRule.Repos.Contains(repo, StringComparer.OrdinalIgnoreCase))
+                            pullRequestRule.Repos.Add(repo);
+                    }
+
+                    if (parseResult.GetValue(anyAuthorOption))
+                    {
+                        pullRequestRule.AuthorMode = AuthorMode.Any;
+                        pullRequestRule.Authors.Clear();
+                    }
+                    else if (parseResult.GetValue(writeOnlyAuthorsOption))
+                    {
+                        pullRequestRule.AuthorMode = AuthorMode.WriteAccess;
+                        pullRequestRule.Authors.Clear();
+                    }
+
+                    var prAddAuthors = parseResult.GetValue(addAuthorOption) ?? [];
+                    var prDeleteAuthors = parseResult.GetValue(deleteAuthorOption) ?? [];
+                    foreach (var author in prDeleteAuthors)
+                        pullRequestRule.Authors.RemoveAll(a => string.Equals(a, author, StringComparison.OrdinalIgnoreCase));
+                    foreach (var author in prAddAuthors)
+                    {
+                        if (!pullRequestRule.Authors.Contains(author, StringComparer.OrdinalIgnoreCase))
+                            pullRequestRule.Authors.Add(author);
+                    }
+
+                    if (pullRequestRule.Authors.Count > 0 && pullRequestRule.AuthorMode == AuthorMode.Any)
+                    {
+                        pullRequestRule.AuthorMode = AuthorMode.Allowed;
+                    }
+
+                    if (prAddRepos.Length > 0)
+                    {
+                        CopilotTrustCommandHelper.EnsureTrustedFoldersForRepositories(
+                            copilotTrust,
+                            repoResolver,
+                            copilotCli,
+                            config,
+                            state,
+                            prAddRepos);
+                    }
+
+                    stateStore.SaveConfig(config);
+                    ConsoleOutput.Success($"Pull request rule '{name}' updated.");
+                    return 0;
                 }
 
                 if (parseResult.GetResult(assigneeOption) is not null)
-                    rule.User = parseResult.GetValue(assigneeOption);
+                    issueRule.Assignee = parseResult.GetValue(assigneeOption);
 
                 var addLabels = parseResult.GetValue(addLabelOption) ?? [];
                 var deleteLabels = parseResult.GetValue(deleteLabelOption) ?? [];
                 foreach (var label in deleteLabels)
-                    rule.Labels.Remove(label);
+                    issueRule.Labels.Remove(label);
                 foreach (var label in addLabels)
                 {
-                    if (!rule.Labels.Contains(label, StringComparer.OrdinalIgnoreCase))
-                        rule.Labels.Add(label);
+                    if (!issueRule.Labels.Contains(label, StringComparer.OrdinalIgnoreCase))
+                        issueRule.Labels.Add(label);
                 }
 
                 if (parseResult.GetResult(milestoneOption) is not null)
-                    rule.Milestone = parseResult.GetValue(milestoneOption);
+                    issueRule.Milestone = parseResult.GetValue(milestoneOption);
 
                 if (parseResult.GetResult(typeOption) is not null)
-                    rule.Type = parseResult.GetValue(typeOption);
+                    issueRule.Type = parseResult.GetValue(typeOption);
 
                 if (parseResult.GetResult(yoloOption) is not null)
-                    rule.Yolo = parseResult.GetValue(yoloOption) ?? false;
+                    issueRule.Yolo = parseResult.GetValue(yoloOption) ?? false;
 
                 if (parseResult.GetResult(allowAllToolsOption) is not null)
-                    rule.AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true;
+                    issueRule.AllowAllTools = parseResult.GetValue(allowAllToolsOption) ?? true;
 
                 if (parseResult.GetResult(allowAllUrlsOption) is not null)
-                    rule.AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false;
+                    issueRule.AllowAllUrls = parseResult.GetValue(allowAllUrlsOption) ?? false;
 
                 if (parseResult.GetResult(promptOption) is not null)
-                    rule.ExtraPrompt = parseResult.GetValue(promptOption);
+                    issueRule.ExtraPrompt = parseResult.GetValue(promptOption);
 
                 if (parseResult.GetResult(modelOption) is not null)
                 {
                     var modelValue = parseResult.GetValue(modelOption);
-                    rule.Model = string.IsNullOrWhiteSpace(modelValue) ? null : modelValue;
+                    issueRule.Model = string.IsNullOrWhiteSpace(modelValue) ? null : modelValue;
                 }
 
                 if (parseResult.GetResult(customPromptOption) is not null)
-                    rule.CustomPrompt = parseResult.GetValue(customPromptOption);
+                    issueRule.CustomPrompt = parseResult.GetValue(customPromptOption);
 
                 if (parseResult.GetResult(customPromptModeOption) is not null)
                 {
@@ -374,46 +687,46 @@ public static class RulesCommand
                         ConsoleOutput.Error("Invalid --custom-prompt-mode. Use 'append' or 'override'.");
                         return 1;
                     }
-                    rule.CustomPromptMode = mode;
+                    issueRule.CustomPromptMode = mode;
                 }
 
                 var addRepos = parseResult.GetValue(addRepoOption) ?? [];
                 var deleteRepos = parseResult.GetValue(deleteRepoOption) ?? [];
                 foreach (var repo in deleteRepos)
-                    rule.Repos.RemoveAll(r => string.Equals(r, repo, StringComparison.OrdinalIgnoreCase));
+                    issueRule.Repos.RemoveAll(r => string.Equals(r, repo, StringComparison.OrdinalIgnoreCase));
                 foreach (var repo in addRepos)
                 {
-                    if (!rule.Repos.Contains(repo, StringComparer.OrdinalIgnoreCase))
-                        rule.Repos.Add(repo);
+                    if (!issueRule.Repos.Contains(repo, StringComparer.OrdinalIgnoreCase))
+                        issueRule.Repos.Add(repo);
                 }
 
                 // Author mode updates: --any-author and --write-only-authors change the mode;
                 // --add-author/--delete-author modify the allowed list (and imply Allowed mode)
                 if (parseResult.GetValue(anyAuthorOption))
                 {
-                    rule.AuthorMode = AuthorMode.Any;
-                    rule.Authors.Clear();
+                    issueRule.AuthorMode = AuthorMode.Any;
+                    issueRule.Authors.Clear();
                 }
                 else if (parseResult.GetValue(writeOnlyAuthorsOption))
                 {
-                    rule.AuthorMode = AuthorMode.WriteAccess;
-                    rule.Authors.Clear();
+                    issueRule.AuthorMode = AuthorMode.WriteAccess;
+                    issueRule.Authors.Clear();
                 }
 
                 var addAuthors = parseResult.GetValue(addAuthorOption) ?? [];
                 var deleteAuthors = parseResult.GetValue(deleteAuthorOption) ?? [];
                 foreach (var author in deleteAuthors)
-                    rule.Authors.RemoveAll(a => string.Equals(a, author, StringComparison.OrdinalIgnoreCase));
+                    issueRule.Authors.RemoveAll(a => string.Equals(a, author, StringComparison.OrdinalIgnoreCase));
                 foreach (var author in addAuthors)
                 {
-                    if (!rule.Authors.Contains(author, StringComparer.OrdinalIgnoreCase))
-                        rule.Authors.Add(author);
+                    if (!issueRule.Authors.Contains(author, StringComparer.OrdinalIgnoreCase))
+                        issueRule.Authors.Add(author);
                 }
 
                 // If authors were added and mode is still Any, switch to Allowed
-                if (rule.Authors.Count > 0 && rule.AuthorMode == AuthorMode.Any)
+                if (issueRule.Authors.Count > 0 && issueRule.AuthorMode == AuthorMode.Any)
                 {
-                    rule.AuthorMode = AuthorMode.Allowed;
+                    issueRule.AuthorMode = AuthorMode.Allowed;
                 }
 
                 if (addRepos.Length > 0)
@@ -458,7 +771,11 @@ public static class RulesCommand
                     return 1;
                 }
 
-                if (!config.Rules.Remove(name))
+                var removed = config.IssueRules.Remove(name);
+                if (!removed)
+                    removed = config.PullRequestRules.Remove(name);
+
+                if (!removed)
                 {
                     ConsoleOutput.Error($"Rule '{name}' not found.");
                     return 1;
@@ -488,6 +805,39 @@ public static class RulesCommand
         if (string.Equals(value, "override", StringComparison.OrdinalIgnoreCase))
         {
             mode = PromptMode.Override;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseBranchStrategy(string? value, out PullRequestBranchStrategy strategy)
+    {
+        strategy = PullRequestBranchStrategy.SourceBranch;
+        if (string.IsNullOrWhiteSpace(value))
+            return true;
+
+        if (string.Equals(value, "source-branch", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "source", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, nameof(PullRequestBranchStrategy.SourceBranch), StringComparison.OrdinalIgnoreCase))
+        {
+            strategy = PullRequestBranchStrategy.SourceBranch;
+            return true;
+        }
+
+        if (string.Equals(value, "child-branch", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "child", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, nameof(PullRequestBranchStrategy.ChildBranch), StringComparison.OrdinalIgnoreCase))
+        {
+            strategy = PullRequestBranchStrategy.ChildBranch;
+            return true;
+        }
+
+        if (string.Equals(value, "read-only", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "readonly", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, nameof(PullRequestBranchStrategy.ReadOnly), StringComparison.OrdinalIgnoreCase))
+        {
+            strategy = PullRequestBranchStrategy.ReadOnly;
             return true;
         }
 

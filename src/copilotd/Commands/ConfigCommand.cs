@@ -1,5 +1,6 @@
 using System.CommandLine;
 using Copilotd.Infrastructure;
+using Copilotd.Models;
 using Copilotd.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -44,31 +45,63 @@ public static class ConfigCommand
                     table.AddRow("current_user", Markup.Escape(config.CurrentUser ?? "(not set)"));
                     table.AddRow("max_instances", Markup.Escape(config.MaxInstances.ToString()));
                     table.AddRow("session_shutdown_delay_seconds", Markup.Escape(config.SessionShutdownDelaySeconds.ToString()));
-                    table.AddRow("rules", Markup.Escape($"{config.Rules.Count} rule(s)"));
+                    table.AddRow("issue_rules", Markup.Escape($"{config.IssueRules.Count} rule(s)"));
+                    table.AddRow("pull_request_rules", Markup.Escape($"{config.PullRequestRules.Count} rule(s)"));
 
-                    if (config.Rules.Count > 0)
+                    if (config.IssueRules.Count > 0)
                     {
-                        foreach (var (name, rule) in config.Rules)
+                        foreach (var (name, issueRule) in config.IssueRules)
                         {
                             var details = new List<string>();
-                            if (rule.User is not null) details.Add($"user={rule.User}");
-                            if (rule.Labels.Count > 0) details.Add($"labels={string.Join(",", rule.Labels)}");
-                            if (rule.Milestone is not null) details.Add($"milestone={rule.Milestone}");
-                            if (rule.Type is not null) details.Add($"type={rule.Type}");
-                            if (rule.Repos.Count > 0) details.Add($"repos={string.Join(",", rule.Repos)}");
-                            if (rule.Yolo) details.Add("yolo=true");
+                            if (issueRule.Assignee is not null) details.Add($"assignee={issueRule.Assignee}");
+                            if (issueRule.Labels.Count > 0) details.Add($"labels={string.Join(",", issueRule.Labels)}");
+                            if (issueRule.Milestone is not null) details.Add($"milestone={issueRule.Milestone}");
+                            if (issueRule.Type is not null) details.Add($"type={issueRule.Type}");
+                            if (issueRule.Repos.Count > 0) details.Add($"repos={string.Join(",", issueRule.Repos)}");
+                            if (issueRule.Yolo) details.Add("yolo=true");
                             else
                             {
-                                if (rule.AllowAllTools) details.Add("allow_all_tools=true");
-                                if (rule.AllowAllUrls) details.Add("allow_all_urls=true");
+                                if (issueRule.AllowAllTools) details.Add("allow_all_tools=true");
+                                if (issueRule.AllowAllUrls) details.Add("allow_all_urls=true");
                             }
-                            if (rule.Model is not null) details.Add($"model={rule.Model}");
-                            if (rule.ExtraPrompt is not null) details.Add($"extra_prompt={rule.ExtraPrompt}");
-                            if (rule.CustomPrompt is not null) details.Add($"custom_prompt={rule.CustomPrompt}");
-                            if (rule.CustomPrompt is not null) details.Add($"custom_prompt_mode={rule.CustomPromptMode.ToString().ToLowerInvariant()}");
+                            if (issueRule.Model is not null) details.Add($"model={issueRule.Model}");
+                            if (issueRule.ExtraPrompt is not null) details.Add($"extra_prompt={issueRule.ExtraPrompt}");
+                            if (issueRule.CustomPrompt is not null) details.Add($"custom_prompt={issueRule.CustomPrompt}");
+                            if (issueRule.CustomPrompt is not null) details.Add($"custom_prompt_mode={issueRule.CustomPromptMode.ToString().ToLowerInvariant()}");
 
                             table.AddRow(
-                                Markup.Escape($"  rule[{name}]"),
+                                Markup.Escape($"  issue_rule[{name}]"),
+                                Markup.Escape(details.Count > 0 ? string.Join(", ", details) : "(no conditions)"));
+                        }
+                    }
+
+                    if (config.PullRequestRules.Count > 0)
+                    {
+                        foreach (var (name, pullRequestRule) in config.PullRequestRules)
+                        {
+                            var details = new List<string>();
+                            if (pullRequestRule.Assignee is not null) details.Add($"assignee={pullRequestRule.Assignee}");
+                            if (pullRequestRule.Labels.Count > 0) details.Add($"labels={string.Join(",", pullRequestRule.Labels)}");
+                            if (pullRequestRule.BaseBranch is not null) details.Add($"base={pullRequestRule.BaseBranch}");
+                            if (pullRequestRule.HeadBranch is not null) details.Add($"head={pullRequestRule.HeadBranch}");
+                            if (pullRequestRule.HeadRepo is not null) details.Add($"head_repo={pullRequestRule.HeadRepo}");
+                            if (pullRequestRule.Draft is not null) details.Add($"draft={pullRequestRule.Draft.Value.ToString().ToLowerInvariant()}");
+                            if (pullRequestRule.ReviewDecision is not null) details.Add($"review_decision={pullRequestRule.ReviewDecision}");
+                            details.Add($"branch_strategy={pullRequestRule.BranchStrategy.ToString().ToLowerInvariant()}");
+                            if (pullRequestRule.Repos.Count > 0) details.Add($"repos={string.Join(",", pullRequestRule.Repos)}");
+                            if (pullRequestRule.Yolo) details.Add("yolo=true");
+                            else
+                            {
+                                if (pullRequestRule.AllowAllTools) details.Add("allow_all_tools=true");
+                                if (pullRequestRule.AllowAllUrls) details.Add("allow_all_urls=true");
+                            }
+                            if (pullRequestRule.Model is not null) details.Add($"model={pullRequestRule.Model}");
+                            if (pullRequestRule.ExtraPrompt is not null) details.Add($"extra_prompt={pullRequestRule.ExtraPrompt}");
+                            if (pullRequestRule.CustomPrompt is not null) details.Add($"custom_prompt={pullRequestRule.CustomPrompt}");
+                            if (pullRequestRule.CustomPrompt is not null) details.Add($"custom_prompt_mode={pullRequestRule.CustomPromptMode.ToString().ToLowerInvariant()}");
+
+                            table.AddRow(
+                                Markup.Escape($"  pr_rule[{name}]"),
                                 Markup.Escape(details.Count > 0 ? string.Join(", ", details) : "(no conditions)"));
                         }
                     }
@@ -102,8 +135,9 @@ public static class ConfigCommand
                             copilotCli,
                             cfg,
                             stateStore.LoadState(),
-                            cfg.Rules.Values
-                                .SelectMany(rule => rule.Repos)
+                                cfg.IssueRules.Values.Cast<DispatchRuleOptions>()
+                                    .Concat(cfg.PullRequestRules.Values)
+                                    .SelectMany(dispatchRule => dispatchRule.Repos)
                                 .Distinct(StringComparer.OrdinalIgnoreCase)
                                 .ToList());
                         ConsoleOutput.Success($"repo_home set to: {cfg.RepoHome}");
