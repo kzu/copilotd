@@ -229,10 +229,10 @@ public sealed class DispatchRule
     /// <summary>Whether to pass --allow-all-urls to copilot. Defaults to false. Implied by Yolo.</summary>
     public bool AllowAllUrls { get; set; }
 
-    /// <summary>Whether to pass --autopilot to copilot, enabling fully autonomous mode.</summary>
+    /// <summary>Whether to pass --autopilot to copilot, enabling fully autonomous mode. Defaults to false.</summary>
     public bool Autopilot { get; set; }
 
-    /// <summary>Whether to pass --plan to copilot, enabling plan-only mode.</summary>
+    /// <summary>Whether to pass --plan to copilot, enabling plan-only mode. Defaults to false.</summary>
     public bool Plan { get; set; }
 
     /// <summary>
